@@ -1,0 +1,10 @@
+[
+    {
+        "doctor_name": "Agent.Doctor.GPT",
+        "doctor_openai_model_name": "gpt-5-nano"
+    },
+    {
+        "doctor_name": "Agent.Doctor.GPT",
+        "doctor_openai_model_name": "gpt-5-nano"
+    }
+]

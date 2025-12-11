@@ -102,42 +102,165 @@ class Consultation:
         print("duration: ", time.time() - st)
         
     def _diagnosis(self, patient):
-        dialog_history = [{"turn": 0, "role": "Doctor", "content": self.doctor.doctor_greet}]
+        dialog_history = [{
+            "turn": 0,
+            "role": "Doctor",
+            "content": self.doctor.doctor_greet,
+            "speaker": "Doctor",
+            "recipient": "Patient"
+        }]
         self.doctor.memorize(("assistant", self.doctor.doctor_greet), patient.id)
         if self.ff_print:
             print("############### Dialog ###############")
             print("--------------------------------------")
-            print(dialog_history[-1]["turn"], dialog_history[-1]["role"])
+            print(dialog_history[-1]["turn"], "Doctor -> Patient")
             print(dialog_history[-1]["content"])
         for turn in range(self.max_conversation_turn):
             patient_response = patient.speak(dialog_history[-1]["role"], dialog_history[-1]["content"])
-            dialog_history.append({"turn": turn+1, "role": "Patient", "content": patient_response})
-            if self.ff_print:
-                print("--------------------------------------")
-                print(dialog_history[-1]["turn"], dialog_history[-1]["role"])
-                print(dialog_history[-1]["content"])
-            if "<结束>" in patient_response: break
-            speak_to, patient_response = patient.parse_role_content(patient_response)
 
-            if speak_to == "医生":
-                # doctor_response = input()
-                doctor_response = self.doctor.speak(patient_response, patient.id)
-                dialog_history.append({"turn": turn+1, "role": "Doctor", "content": doctor_response})
-            elif speak_to == "检查员":
-                reporter_response = self.reporter.speak(patient.medical_records, patient_response)
-                dialog_history.append({"turn": turn+1, "role": "Reporter", "content": reporter_response})
-                doctor_response = self.doctor.speak(reporter_response, patient.id)
-                dialog_history.append({"turn": turn+1, "role": "Doctor", "content": doctor_response})
-            else:
-                raise "Wrong!"
-            if self.ff_print:
-                if speak_to == "检查员":
+            if "<结束>" in patient_response:
+                break
+
+            speak_to, patient_response_parsed = patient.parse_role_content(patient_response)
+
+            # Handle dual response (patient speaking to both reporter and doctor)
+            if speak_to == "双向":
+                reporter_content = patient_response_parsed["reporter"]
+                doctor_content = patient_response_parsed["doctor"]
+
+                if reporter_content:
+                    # Patient asks Reporter for exam results
+                    dialog_history.append({
+                        "turn": turn+1,
+                        "role": "Patient",
+                        "content": reporter_content,
+                        "speaker": "Patient",
+                        "recipient": "Reporter"
+                    })
+
+                    if self.ff_print:
+                        print("--------------------------------------")
+                        print(dialog_history[-1]["turn"], "Patient -> Reporter")
+                        print(dialog_history[-1]["content"])
+
+                    # Reporter provides results
+                    reporter_response = self.reporter.speak(patient.medical_records, reporter_content)
+                    dialog_history.append({
+                        "turn": turn+1,
+                        "role": "Reporter",
+                        "content": reporter_response
+                    })
+
+                    if self.ff_print:
+                        print("--------------------------------------")
+                        print(dialog_history[-1]["turn"], "Reporter")
+                        print(dialog_history[-1]["content"])
+
+                if doctor_content:
+                    # Patient answers Doctor's questions
+                    dialog_history.append({
+                        "turn": turn+1,
+                        "role": "Patient",
+                        "content": doctor_content,
+                        "speaker": "Patient",
+                        "recipient": "Doctor"
+                    })
+
+                    if self.ff_print:
+                        print("--------------------------------------")
+                        print(dialog_history[-1]["turn"], "Patient -> Doctor")
+                        print(dialog_history[-1]["content"])
+
+                    # Doctor responds with context of exam results if available
+                    doctor_input = doctor_content
+                    if reporter_content:
+                        doctor_input = f"{doctor_content}\n\n[检查结果]\n{reporter_response}"
+
+                    doctor_response = self.doctor.speak(doctor_input, patient.id)
+                    dialog_history.append({
+                        "turn": turn+1,
+                        "role": "Doctor",
+                        "content": doctor_response,
+                        "speaker": "Doctor",
+                        "recipient": "Patient"
+                    })
+
+                    if self.ff_print:
+                        print("--------------------------------------")
+                        print(dialog_history[-1]["turn"], "Doctor -> Patient")
+                        print(dialog_history[-1]["content"])
+
+            elif speak_to == "医生":
+                # Patient speaks only to doctor
+                dialog_history.append({
+                    "turn": turn+1,
+                    "role": "Patient",
+                    "content": patient_response_parsed,
+                    "speaker": "Patient",
+                    "recipient": "Doctor"
+                })
+
+                if self.ff_print:
                     print("--------------------------------------")
-                    print(dialog_history[-2]["turn"], dialog_history[-2]["role"])
-                    print(dialog_history[-2]["content"])
-                print("--------------------------------------")
-                print(dialog_history[-1]["turn"], dialog_history[-1]["role"])
-                print(dialog_history[-1]["content"])
+                    print(dialog_history[-1]["turn"], "Patient -> Doctor")
+                    print(dialog_history[-1]["content"])
+
+                doctor_response = self.doctor.speak(patient_response_parsed, patient.id)
+                dialog_history.append({
+                    "turn": turn+1,
+                    "role": "Doctor",
+                    "content": doctor_response,
+                    "speaker": "Doctor",
+                    "recipient": "Patient"
+                })
+
+                if self.ff_print:
+                    print("--------------------------------------")
+                    print(dialog_history[-1]["turn"], "Doctor -> Patient")
+                    print(dialog_history[-1]["content"])
+
+            elif speak_to == "检查员":
+                # Patient asks Reporter for exam results only
+                dialog_history.append({
+                    "turn": turn+1,
+                    "role": "Patient",
+                    "content": patient_response_parsed,
+                    "speaker": "Patient",
+                    "recipient": "Reporter"
+                })
+
+                if self.ff_print:
+                    print("--------------------------------------")
+                    print(dialog_history[-1]["turn"], "Patient -> Reporter")
+                    print(dialog_history[-1]["content"])
+
+                reporter_response = self.reporter.speak(patient.medical_records, patient_response_parsed)
+                dialog_history.append({
+                    "turn": turn+1,
+                    "role": "Reporter",
+                    "content": reporter_response
+                })
+
+                if self.ff_print:
+                    print("--------------------------------------")
+                    print(dialog_history[-1]["turn"], "Reporter")
+                    print(dialog_history[-1]["content"])
+
+                doctor_response = self.doctor.speak(reporter_response, patient.id)
+                dialog_history.append({
+                    "turn": turn+1,
+                    "role": "Doctor",
+                    "content": doctor_response,
+                    "speaker": "Doctor",
+                    "recipient": "Patient"
+                })
+
+                if self.ff_print:
+                    print("--------------------------------------")
+                    print(dialog_history[-1]["turn"], "Doctor -> Patient")
+                    print(dialog_history[-1]["content"])
+            else:
+                raise Exception("Wrong!")
         
         doctor_response = self.doctor.speak(self.medical_director_summary_query, patient.id)
         dialog_history.append({"turn": turn+1, "role": "Doctor", "content": doctor_response})

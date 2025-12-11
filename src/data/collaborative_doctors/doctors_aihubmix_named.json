@@ -1,0 +1,12 @@
+[
+    {
+        "doctor_name": "Agent.Doctor.AiHubMix",
+        "doctor_aihubmix_model_name": "gpt-5-nano",
+        "doctor_nickname": "Dr_Zhang"
+    },
+    {
+        "doctor_name": "Agent.Doctor.AiHubMix",
+        "doctor_aihubmix_model_name": "gpt-5-nano",
+        "doctor_nickname": "Dr_Li"
+    }
+]

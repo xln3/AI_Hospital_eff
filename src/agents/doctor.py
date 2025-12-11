@@ -11,14 +11,48 @@ class Doctor(Agent):
     def __init__(self, engine=None, doctor_info=None, name="A"):
         if doctor_info is None:
             self.system_message = \
-                "你是一个专业且耐心的医生，下面会有患者向你咨询病情。你需要：\n" + \
-                "(1) 在信息不充分的情况下，不要过早作出诊断。\n" + \
-                "(2) 多次、主动地向患者提问来获取充足的信息。\n" + \
-                "(3) 每次只提一个问题，尽量简短。\n" + \
-                "(4) 必要时要求患者进行检查，并等待患者反馈。\n" + \
-                "(5) 最后根据患者的身体状况和检查结果，给出诊断结果、对应的诊断依据和治疗方案。\n" + \
-                "(6) 诊断结果需要准确到具体疾病，治疗方案中不要包含检查。"
-                
+                "你是一个专业且高效的医生，正在与患者对话进行诊断。你必须在有限的对话轮次内完成诊断。\n\n" + \
+                "## 对话流程（严格遵守）\n" + \
+                "(1) 第1轮：询问主诉、病史、主要症状（简短提问，1-2个问题）\n" + \
+                "(2) 第2-3轮：根据症状直接要求必要检查。说'让我们做XXX检查'，患者会找检查员获取结果。\n" + \
+                "    【重要】此时绝不能说<诊断完成>，必须等待检查结果\n" + \
+                "(3) 第4-5轮：收到检查结果后，立即分析并给出诊断，或补充1-2项关键检查\n" + \
+                "(4) 第6轮开始：必须给出明确诊断和治疗方案\n" + \
+                "(5) 【关键】只有在以下情况才能说<诊断完成>：\n" + \
+                "    - 你已经收到并分析了检查员给出的检查结果\n" + \
+                "    - 你已经给出了完整的诊断结果和治疗建议\n" + \
+                "    - 绝不能在要求检查后立即说<诊断完成>，必须等到下一轮收到结果并分析完成\n\n" + \
+                "## 重要禁令\n" + \
+                "- 禁止重复请求已经完成的检查项目（即使结果是'无异常'，也说明已经查过了）\n" + \
+                "- 禁止建议患者转院、换医院、找专家，除非病情确实超出诊断能力\n" + \
+                "- 禁止提供预约服务、随访安排等非诊断内容，专注于当前诊断\n" + \
+                "- 禁止说'您可以去XXX医院'、'我帮您安排XXX'等推诿性话语\n" + \
+                "- 禁止在收到检查结果后不分析、不诊断，而是继续问无关问题\n" + \
+                "- 禁止自问自答（如'需要准备什么？通常不需要...'），这不是自然对话\n" + \
+                "- 【严禁】禁止告诉患者如何准备检查、去哪个科室、带什么材料、检查流程等后勤信息\n" + \
+                "- 【严禁】禁止说'下面把准备要点给你讲清楚'、'需要带的材料'、'现场要点'等非医学内容\n" + \
+                "- 【严禁】你的角色是医生，不是导诊员或行政人员，只谈医学诊断和治疗\n\n" + \
+                "## 检查结果处理规则\n" + \
+                "- 检查员回复了检查项目（无论结果是数值、'无异常'、'无数据'），都说明该检查已完成\n" + \
+                "- 收到检查结果后，必须立即分析结果并推进诊断，不要再重复请求同一检查\n" + \
+                "- 如果检查结果'无异常'，说明该项正常，应综合其他信息做诊断，不是重新要求检查\n\n" + \
+                "## 说话方式（极其重要）\n" + \
+                "你必须像真实医生面对面交流一样自然说话，严禁使用以下格式：\n" + \
+                "❌ 禁止使用编号：1. 2. 3. 或 (1) (2) (3) 或 一、二、三\n" + \
+                "❌ 禁止使用项目符号：- 或 • 或 √\n" + \
+                "❌ 禁止列清单式回答（如'以下是建议：1...2...3...'）\n" + \
+                "❌ 禁止使用'##'、'###'等标题格式\n" + \
+                "❌ 禁止写成报告或文档格式\n" + \
+                "❌ 禁止自问自答（不要说'需要什么？答：XXX'，患者会问的）\n" + \
+                "❌ 禁止在一句话里既提问又回答（等患者回答）\n\n" + \
+                "✅ 正确方式：用自然流畅的句子说话，像面对面聊天\n" + \
+                "✅ 例如：'听起来像是脑梗死的可能性比较大。你这个左边手脚无力，结合CT看到的右侧病灶，是典型的表现。我们需要用阿司匹林来预防，同时控制好血压和血糖。'\n" + \
+                "✅ 可以用'首先'、'另外'、'还有'这样的连接词，但不要编号\n" + \
+                "✅ 即使提出多个建议，也要用自然的句子连接，不要列表\n" + \
+                "✅ 问患者问题就停下，等患者回答，不要自己继续往下说\n" + \
+                "✅ 要求检查时简单说'让我们做XXX检查'即可，患者自己会去办理\n\n" + \
+                "你必须在8轮对话内完成诊断，高效推进对话，避免重复和无效沟通。记住：像真人医生一样说话，只谈医学诊断，不谈后勤安排。"
+
         else: self.system_message = doctor_info
 
         self.name = name
@@ -84,7 +118,7 @@ class Doctor(Agent):
         diagnosis = diagnosis + "\n#"
 
         for key in ["症状", "辅助检查", "诊断结果", "诊断依据", "治疗方案"]:
-            diagnosis_part = re.findall("\#{}\#(.*?)\n\#".format(key), diagnosis, re.S)
+            diagnosis_part = re.findall(r"\#{}\#(.*?)\n\#".format(key), diagnosis, re.S)
             if len(diagnosis_part) > 0:
                 diagnosis_part = diagnosis_part[0].strip()
                 diagnosis_part = re.sub(r"\#{}\#".format(key), '', diagnosis_part)
@@ -167,7 +201,6 @@ class Doctor(Agent):
             raise Exception("Wrong discussion_mode: {}".format(discussion_mode))
 
     def revise_diagnosis_by_others_in_parallel(self, patient, doctors):
-        int_to_char = {0: "A", 1: "B", 2: "C", 3: "D"}
         # load the symptom and examination from the host
         system_message = "你是一个专业的医生。\n" + \
             "你正在为患者做诊断，患者的症状和辅助检查如下：\n" + \
@@ -203,7 +236,6 @@ class Doctor(Agent):
         )
 
     def revise_diagnosis_by_others_in_parallel_with_critique(self, patient, doctors, host_critique=None):
-        # int_to_char = {0: "A", 1: "B", 2: "C", 3: "D"}
         # load the symptom and examination from the host
         system_message = "你是一个专业的医生{}。\n".format(self.name) + \
             "你正在为患者做诊断，患者的症状和辅助检查如下：\n" + \
@@ -226,8 +258,8 @@ class Doctor(Agent):
         for i, doctor in enumerate(doctors):
             content += "##医生{}##\n\n#诊断结果#\n{}\n\n#诊断依据#\n{}\n\n#治疗方案#\n{}\n\n".format(
                 doctor.name,
-                doctor.get_diagnosis_by_patient_id(patient.id, key="诊断结果"), 
-                doctor.get_diagnosis_by_patient_id(patient.id, key="诊断依据"), 
+                doctor.get_diagnosis_by_patient_id(patient.id, key="诊断结果"),
+                doctor.get_diagnosis_by_patient_id(patient.id, key="诊断依据"),
                 doctor.get_diagnosis_by_patient_id(patient.id, key="治疗方案")
             )
         content += "##主任医生##\n{}".format(host_critique)
@@ -236,13 +268,73 @@ class Doctor(Agent):
         # print(content)
         # print("-"*100)
         responese = self.get_response([
-            {"role": "system", "content": system_message}, 
+            {"role": "system", "content": system_message},
             {"role": "user", "content": content}
         ])
         self.load_diagnosis(
             diagnosis=responese,
             patient_id=patient.id
         )
+
+    def _format_diagnosis(self, diagnosis_dict):
+        """
+        Format diagnosis dictionary for display in prompts.
+
+        Args:
+            diagnosis_dict: Dictionary with diagnosis fields
+
+        Returns:
+            Formatted string representation
+        """
+        formatted = ""
+        for key in ["症状", "辅助检查", "诊断结果", "诊断依据", "治疗方案"]:
+            value = diagnosis_dict.get(key, "")
+            if value:
+                formatted += f"#{key}#\n{value}\n\n"
+        return formatted.rstrip()
+
+    def revise_diagnosis_with_new_info(self, patient, new_information, context):
+        """
+        Revise diagnosis when host provides new information from patient/reporter.
+
+        Args:
+            patient: Patient object
+            new_information: New data from patient query or examination
+            context: Host's explanation of why this info was gathered
+        """
+        current_diagnosis = self.get_diagnosis_by_patient_id(patient.id)
+
+        system_message = f"""你是一个专业的医生。
+
+你之前的诊断：
+{self._format_diagnosis(current_diagnosis)}
+
+会诊主持人提供了新的信息：
+{new_information}
+
+原因：{context}
+
+请根据这个新信息，重新评估你的诊断。如果需要修改，请更新诊断结果、诊断依据和治疗方案。
+
+按照以下格式输出：
+#诊断结果#
+...
+
+#诊断依据#
+...
+
+#治疗方案#
+...
+"""
+
+        revised_diagnosis = self.get_response([
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": "请提供你更新后的诊断。"}
+        ])
+
+        # Parse and update
+        diagnosis_dict = self.parse_diagnosis(revised_diagnosis)
+        self.diagnosis[patient.id].update(diagnosis_dict)
 
 
 @register_class(alias="Agent.Doctor.GPT")
@@ -538,3 +630,45 @@ class HFDoctor(Doctor):
         self.memorize(("user", content), patient_id)
         self.memorize(("assistant", responese), patient_id)
         return responese
+
+
+@register_class(alias="Agent.Doctor.AiHubMix")
+class AiHubMixDoctor(Doctor):
+    def __init__(self, args=None, doctor_info=None, name="A"):
+        engine = registry.get_class("Engine.AiHubMix")(
+            aihubmix_api_key=args.doctor_aihubmix_api_key,
+            aihubmix_model_name=args.doctor_aihubmix_model_name,
+            temperature=args.doctor_temperature,
+            max_tokens=args.doctor_max_tokens,
+            top_p=args.doctor_top_p,
+            frequency_penalty=args.doctor_frequency_penalty,
+            presence_penalty=args.doctor_presence_penalty
+        )
+        super(AiHubMixDoctor, self).__init__(engine, doctor_info, name=name)
+
+    @staticmethod
+    def add_parser_args(parser):
+        parser.add_argument('--doctor_aihubmix_api_key', type=str, help='API key for AiHubMix')
+        parser.add_argument('--doctor_aihubmix_model_name', type=str, default='gpt-5-nano', help='Model name for AiHubMix')
+        parser.add_argument('--doctor_temperature', type=float, default=0.3, help='temperature (slightly higher for more natural conversation)')
+        parser.add_argument('--doctor_max_tokens', type=int, default=16384, help='max tokens (higher for reasoning models like gpt-5-nano)')
+        parser.add_argument('--doctor_top_p', type=float, default=1, help='top p')
+        parser.add_argument('--doctor_frequency_penalty', type=float, default=0, help='frequency penalty')
+        parser.add_argument('--doctor_presence_penalty', type=float, default=0, help='presence penalty')
+
+    def get_response(self, messages):
+        response = self.engine.get_response(messages)
+        return response
+
+    def speak(self, content, patient_id, save_to_memory=True):
+        memories = self.memories[patient_id]
+
+        messages = [{"role": memory[0], "content": memory[1]} for memory in memories]
+        messages.append({"role": "user", "content": content})
+
+        response = self.get_response(messages)
+
+        self.memorize(("user", content), patient_id)
+        self.memorize(("assistant", response), patient_id)
+
+        return response

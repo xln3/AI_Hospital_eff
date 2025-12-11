@@ -18,18 +18,29 @@ class CollaborativeConsultation:
         self.args = args
 
         # Load Different Doctor Agents
-        int_to_char = {i: chr(i+65) for i in range(26)}
+        # Use human-readable names for better log differentiation
+        default_names = ["Alice", "Bob", "Carol", "David", "Eve", "Frank", "Grace", "Henry",
+                        "Iris", "Jack", "Kate", "Leo", "Mary", "Noah", "Olivia", "Paul"]
         self.doctors = []
         for i, doctor_args in enumerate(args.doctors_args[:args.number_of_doctors]):
+            # Use custom nickname from config if provided, otherwise use default
+            doctor_name = getattr(doctor_args, 'doctor_nickname', None) or default_names[i]
+
             doctor = registry.get_class(doctor_args.doctor_name)(
                 doctor_args,
-                name=int_to_char[i]
+                name=doctor_name
             )
-            doctor.load_diagnosis(
-                diagnosis_filepath=doctor_args.diagnosis_filepath, 
-                evaluation_filepath=doctor_args.evaluation_filepath,
-                doctor_key=doctor_args.doctor_key
-            )
+            # Set doctor ID for tracking (includes nickname for easy identification)
+            doctor.id = f"Doctor_{doctor_name}_{doctor_args.doctor_name}"
+
+            # Only load pre-computed diagnosis if filepath is provided
+            # Otherwise, diagnosis will be generated online during _run()
+            if hasattr(doctor_args, 'diagnosis_filepath') and doctor_args.diagnosis_filepath:
+                doctor.load_diagnosis(
+                    diagnosis_filepath=doctor_args.diagnosis_filepath,
+                    evaluation_filepath=doctor_args.evaluation_filepath,
+                    doctor_key=doctor_args.doctor_key
+                )
             self.doctors.append(doctor)
 
         # Load Different Patient Agents
@@ -73,6 +84,265 @@ class CollaborativeConsultation:
         parser.add_argument("--parallel", default=False, action="store_true", help="parallel diagnosis")
         parser.add_argument("--discussion_mode", default="Parallel", choices=["Parallel", "Parallel_with_Critique"], help="discussion mode")
 
+    def _conduct_initial_consultation(self, doctor, shared_patient, doctor_index):
+        """
+        Conduct independent doctor-patient consultation.
+
+        Args:
+            doctor: Doctor agent conducting the consultation
+            shared_patient: Original patient instance (for profile/records)
+            doctor_index: Index for logging
+
+        Returns:
+            dict with dialog_history, diagnosis, and metadata
+        """
+        # Create isolated patient instance for this consultation
+        patient = registry.get_class(self.args.patient)(
+            self.args,
+            patient_profile=shared_patient.profile,
+            medical_records=shared_patient.medical_records,
+            patient_id=shared_patient.id,
+        )
+
+        # Initialize dialog
+        dialog_history = [{
+            "turn": 0,
+            "role": "Doctor",
+            "content": doctor.doctor_greet,
+            "speaker": "Doctor",
+            "recipient": "Patient"
+        }]
+        doctor.memorize(("assistant", doctor.doctor_greet), patient.id)
+
+        if self.ff_print:
+            print(f"############### Dialog - Doctor {doctor.name} <{doctor.engine.model_name}> ###############")
+            print("--------------------------------------")
+            print(dialog_history[-1]["turn"], f"Doctor {doctor.name} <{doctor.engine.model_name}> -> Patient")
+            print(dialog_history[-1]["content"])
+
+        # Consultation loop
+        final_turn = 0
+        for turn in range(self.max_conversation_turn):
+            patient_response = patient.speak(dialog_history[-1]["role"], dialog_history[-1]["content"])
+
+            # Don't add unparsed patient response yet - we'll add parsed version(s) below
+            final_turn = turn + 1
+
+            speak_to, patient_response_parsed = patient.parse_role_content(patient_response)
+
+            # Handle dual response (patient speaking to both reporter and doctor)
+            if speak_to == "双向":
+                # Phase 1: Patient asks Reporter for exam results
+                reporter_content = patient_response_parsed["reporter"]
+                doctor_content = patient_response_parsed["doctor"]
+
+                if reporter_content:
+                    dialog_history.append({
+                        "turn": turn+1,
+                        "role": "Patient",
+                        "content": reporter_content,
+                        "speaker": "Patient",
+                        "recipient": "Reporter"
+                    })
+
+                    if self.ff_print:
+                        print("--------------------------------------")
+                        print(dialog_history[-1]["turn"], "Patient -> Reporter")
+                        print(dialog_history[-1]["content"])
+
+                    # Reporter retrieves and provides results (shown as just "Reporter")
+                    reporter_response = self.reporter.speak(patient.medical_records, reporter_content)
+                    dialog_history.append({
+                        "turn": turn+1,
+                        "role": "Reporter",
+                        "content": reporter_response
+                    })
+
+                    if self.ff_print:
+                        print("--------------------------------------")
+                        print(dialog_history[-1]["turn"], "Reporter")
+                        print(dialog_history[-1]["content"])
+
+                # Phase 2: Patient answers Doctor's questions
+                if doctor_content:
+                    dialog_history.append({
+                        "turn": turn+1,
+                        "role": "Patient",
+                        "content": doctor_content,
+                        "speaker": "Patient",
+                        "recipient": "Doctor"
+                    })
+
+                    if self.ff_print:
+                        print("--------------------------------------")
+                        print(dialog_history[-1]["turn"], "Patient -> Doctor")
+                        print(dialog_history[-1]["content"])
+
+                    # Doctor responds based on patient's answer (and has context of reporter's results)
+                    # Combine reporter results with patient's answer for doctor's context
+                    doctor_input = doctor_content
+                    if reporter_content:
+                        doctor_input = f"{doctor_content}\n\n[检查结果]\n{reporter_response}"
+
+                    doctor_response = doctor.speak(doctor_input, patient.id)
+                    dialog_history.append({
+                        "turn": turn+1,
+                        "role": "Doctor",
+                        "content": doctor_response,
+                        "speaker": "Doctor",
+                        "recipient": "Patient"
+                    })
+                    final_turn = turn + 1
+
+                    if self.ff_print:
+                        print("--------------------------------------")
+                        print(dialog_history[-1]["turn"], f"Doctor {doctor.name} <{doctor.engine.model_name}> -> Patient")
+                        print(dialog_history[-1]["content"])
+
+                    # Check if doctor has completed diagnosis
+                    if "<诊断完成>" in doctor_response:
+                        break
+
+            elif speak_to == "医生":
+                # Patient speaks only to doctor
+                dialog_history.append({
+                    "turn": turn+1,
+                    "role": "Patient",
+                    "content": patient_response_parsed,
+                    "speaker": "Patient",
+                    "recipient": "Doctor"
+                })
+
+                if self.ff_print:
+                    print("--------------------------------------")
+                    print(dialog_history[-1]["turn"], "Patient -> Doctor")
+                    print(dialog_history[-1]["content"])
+
+                doctor_response = doctor.speak(patient_response_parsed, patient.id)
+                dialog_history.append({
+                    "turn": turn+1,
+                    "role": "Doctor",
+                    "content": doctor_response,
+                    "speaker": "Doctor",
+                    "recipient": "Patient"
+                })
+                final_turn = turn + 1
+
+                if self.ff_print:
+                    print("--------------------------------------")
+                    print(dialog_history[-1]["turn"], f"Doctor {doctor.name} <{doctor.engine.model_name}> -> Patient")
+                    print(dialog_history[-1]["content"])
+
+                # Check if doctor has completed diagnosis (doctor controls when to end)
+                if "<诊断完成>" in doctor_response:
+                    break
+
+            elif speak_to == "检查员":
+                # Patient asks Reporter for exam results only (no doctor question in same turn)
+                dialog_history.append({
+                    "turn": turn+1,
+                    "role": "Patient",
+                    "content": patient_response_parsed,
+                    "speaker": "Patient",
+                    "recipient": "Reporter"
+                })
+
+                if self.ff_print:
+                    print("--------------------------------------")
+                    print(dialog_history[-1]["turn"], "Patient -> Reporter")
+                    print(dialog_history[-1]["content"])
+
+                # Reporter retrieves and provides results directly (shown as just "Reporter")
+                reporter_response = self.reporter.speak(patient.medical_records, patient_response_parsed)
+                dialog_history.append({
+                    "turn": turn+1,
+                    "role": "Reporter",
+                    "content": reporter_response
+                })
+
+                if self.ff_print:
+                    print("--------------------------------------")
+                    print(dialog_history[-1]["turn"], "Reporter")
+                    print(dialog_history[-1]["content"])
+
+                # Doctor responds based on the exam results
+                doctor_response = doctor.speak(reporter_response, patient.id)
+                dialog_history.append({
+                    "turn": turn+1,
+                    "role": "Doctor",
+                    "content": doctor_response,
+                    "speaker": "Doctor",
+                    "recipient": "Patient"
+                })
+                final_turn = turn + 1
+
+                if self.ff_print:
+                    print("--------------------------------------")
+                    print(dialog_history[-1]["turn"], f"Doctor {doctor.name} <{doctor.engine.model_name}> -> Patient")
+                    print(dialog_history[-1]["content"])
+
+                # Check if doctor has completed diagnosis (doctor controls when to end)
+                if "<诊断完成>" in doctor_response:
+                    break
+            else:
+                raise Exception("Wrong!")
+
+        # Get structured diagnosis
+        medical_director_summary_query = \
+            "【重要】现在需要你提供结构化的诊断总结，用于病历记录。这是数据提取任务，必须使用指定格式，暂时不遵循日常对话规则。严格按照以下格式输出，必须包含 # 标记和编号：\n\n" + \
+            "#症状#\n" + \
+            "(1) 症状描述1\n(2) 症状描述2\n" + \
+            "#辅助检查#\n" + \
+            "(1) 检查项目1: 结果\n(2) 检查项目2: 结果\n" + \
+            "#诊断结果#\n诊断名称和描述\n" + \
+            "#诊断依据#\n" + \
+            "(1) 依据1\n(2) 依据2\n" + \
+            "#治疗方案#\n" + \
+            "(1) 治疗措施1\n" + \
+            "(2) 治疗措施2\n\n" + \
+            "【格式要求】\n" + \
+            "1. 每个章节标题必须使用 #章节名# 格式（两边都有#号）\n" + \
+            "2. 每个章节内容必须使用 (1) (2) (3) 编号\n" + \
+            "3. 这是病历记录格式，不是日常对话，必须结构化\n" + \
+            "4. 不要遗漏任何章节，不要使用其他格式\n" + \
+            "5. 完成后在末尾添加 <诊断完成> 标记"
+
+        doctor_response = doctor.speak(medical_director_summary_query, patient.id)
+        dialog_history.append({"turn": final_turn+1, "role": "Doctor", "content": doctor_response})
+
+        if self.ff_print:
+            print("--------------------------------------")
+            print(dialog_history[-1]["turn"], f"Doctor {doctor.name} <{doctor.engine.model_name}> - FINAL DIAGNOSIS")
+            print(dialog_history[-1]["content"])
+            print("="*100)
+
+        # Parse and store diagnosis
+        diagnosis_dict = doctor.parse_diagnosis(doctor_response)
+
+        # Ensure all required diagnosis fields are initialized
+        # This prevents issues when diagnosis parsing is incomplete
+        required_fields = ["症状", "辅助检查", "诊断结果", "诊断依据", "治疗方案"]
+        missing_fields = []
+        for field in required_fields:
+            if field not in diagnosis_dict or not diagnosis_dict[field]:
+                diagnosis_dict[field] = ""
+                missing_fields.append(field)
+
+        # Log warning if diagnosis parsing failed
+        if missing_fields and self.ff_print:
+            print(f"[WARNING] Doctor {doctor.name} diagnosis parsing incomplete. Missing fields: {missing_fields}")
+            print(f"[WARNING] Raw response length: {len(doctor_response)} chars")
+
+        doctor.diagnosis[patient.id].update(diagnosis_dict)
+
+        return {
+            "doctor_id": doctor_index,
+            "doctor_name": doctor.name,
+            "doctor_class": type(doctor).__name__,
+            "doctor_engine_name": doctor.engine.model_name,
+            "dialog_history": dialog_history,
+            "initial_diagnosis": diagnosis_dict
+        }
 
     def run(self):
         self.remove_processed_patients()
@@ -93,77 +363,558 @@ class CollaborativeConsultation:
         print("duration: ", time.time() - st)
     
     def _run(self, patient):
-        # host summarizes the symptom and examination from different doctors
-        # and asks patient and reporter to verify and correct the symptom and examination
-        symptom_and_examination = self.host.summarize_symptom_and_examination(
-            self.doctors, patient, self.reporter)
-        if self.ff_print:
-            print("symptom_and_examination: {}".format(symptom_and_examination))
-        # revise the diagnosis
-        diagnosis_in_discussion = []
-        diagnosis_in_turn = []
+        # NEW: Initial consultation phase
+        # Generate diagnoses online from each doctor consulting with patient independently
+        initial_dialog_histories = []
+
+        # Create a persistent patient instance for the discussion phase
+        # This patient will handle queries from the host during discussion
+        discussion_patient = registry.get_class(self.args.patient)(
+            self.args,
+            patient_profile=patient.profile,
+            medical_records=patient.medical_records,
+            patient_id=patient.id,
+        )
+
         for i, doctor in enumerate(self.doctors):
-            doctor.revise_diagnosis_by_symptom_and_examination(
-                patient, symptom_and_examination)
-            diagnosis_in_turn.append({
-                "doctor_id": i,
-                "doctor_engine_name": doctor.engine.model_name,
-                "diagnosis": doctor.get_diagnosis_by_patient_id(patient.id)
-            })
-            if self.ff_print:
-                print(doctor.engine.model_name, doctor.get_diagnosis_by_patient_id(patient.id, "诊断结果"))
+            # Check if diagnosis already loaded from file
+            if patient.id not in doctor.diagnosis or not doctor.diagnosis[patient.id]:
+                # Generate diagnosis online through consultation
+                consultation_result = self._conduct_initial_consultation(doctor, patient, i)
+                initial_dialog_histories.append(consultation_result)
+            else:
+                # Pre-computed diagnosis already loaded
+                initial_dialog_histories.append({
+                    "doctor_id": i,
+                    "doctor_name": doctor.name,
+                    "dialog_history": None,
+                    "note": "Pre-computed from file: {}".format(doctor.id)
+                })
+
+        # PHASE 1: Host summarizes symptoms and examinations from doctors only
+        # Host should NOT access patient dataset directly - only use doctors' diagnoses
+        # Get host's initial summary based ONLY on doctors' diagnoses
+        initial_summary_result = self.host.get_initial_summary_from_doctors(self.doctors, discussion_patient)
+
+        # If host found inconsistencies, query patient (NOT reporter initially)
+        # Generate initial symptom_and_examination for future use if needed
+        # This will be updated at the end of discussion to include all new information
+        initial_symptom_and_examination = self.host.finalize_symptom_and_examination(
+            self.doctors, discussion_patient, initial_summary_result, self.reporter)
 
         if self.ff_print:
-            print("-"*100)
-        # doctor revise the diagnosis based on the discussion with other doctors
-        host_measurement = self.host.measure_agreement(self.doctors, patient, discussion_mode=self.discussion_mode)
-        diagnosis_in_discussion.append({
-            "turn": 0,
-            "diagnosis_in_turn": diagnosis_in_turn,
-            "host_critique": host_measurement
-        })
-        if host_measurement != '#结束#':
-            for k in range(self.max_discussion_turn):
-                if self.ff_print:
-                    print(k, "host", host_measurement)
-                diagnosis_in_turn = []
-                for i, doctor in enumerate(self.doctors):
-                    left_doctors = self.doctors[:i] + self.doctors[i+1:]
-                    doctor.revise_diagnosis_by_others(
-                        patient, left_doctors, host_measurement, discussion_mode=self.discussion_mode)
-                    diagnosis_in_turn.append({
-                        "doctor_id": i,
-                        "doctor_engine_name": doctor.engine.model_name,
-                        "diagnosis": doctor.get_diagnosis_by_patient_id(patient.id)
-                    })
-                    if self.ff_print:
-                        print(k, i, doctor.name, doctor.get_diagnosis_by_patient_id(patient.id, "诊断结果"))
-                host_measurement = self.host.measure_agreement(self.doctors, patient)
-                diagnosis_in_discussion.append({
-                    "turn": k+1,
-                    "diagnosis_in_turn": diagnosis_in_turn,
-                    "host_critique": host_measurement
-                })
-                if self.ff_print:
-                    print("host: {}".format(host_measurement))
-                    print("-"*100)
-                if host_measurement == '#结束#':
-                    break
-        else:
-            k = -1
-        
-        final_diagnosis = self.host.summarize_diagnosis(self.doctors, patient)
+            print("="*100)
+            print(f"\n### Collaborative Discussion ({self.discussion_mode} mode) ###\n")
+
+        # Initialize discussion tracking
+        diagnosis_in_discussion = []
+        additional_info_gathered = []
+
+        # Initialize final results (will be set when discussion ends)
+        final_symptom_and_examination = None
+        final_diagnosis = None
+
+        # Turn 1 Phase 1: Use initial diagnoses from consultations as first reports
         if self.ff_print:
-            print("host final diagnosis: {}".format(final_diagnosis))
+            print(f"[Phase 1 - Turn 1]: Doctors report initial diagnoses to host\n")
+
+        # Collect initial diagnoses for Turn 1 Phase 1
+        initial_diagnosis_in_turn = []
+        for i, doctor in enumerate(self.doctors):
+            diagnosis_dict = doctor.get_diagnosis_by_patient_id(discussion_patient.id)
+            initial_diagnosis_in_turn.append({
+                "doctor_id": i,
+                "doctor_engine_name": doctor.engine.model_name,
+                "diagnosis": diagnosis_dict
+            })
+            if self.ff_print:
+                diagnosis_result = diagnosis_dict.get("诊断结果", "N/A") if diagnosis_dict else "N/A"
+                print(f"  [Doctor {doctor.name}({doctor.engine.model_name})]: {diagnosis_result}")
+
+        # Host checks agreement after initial reports
+        if self.ff_print:
+            print("\n" + "-"*100)
+            print(f"[Host({self.host.engine.model_name}) - Turn 1 Agreement Check]\n")
+
+        host_measurement = self.host.measure_agreement(self.doctors, discussion_patient, discussion_mode=self.discussion_mode)
+
+        # Get detailed analysis from host about initial diagnoses
+        initial_analysis = self.host.analyze_discussion_state(
+            self.doctors, discussion_patient, self.reporter)
+
+        # Host queries patient when:
+        # 1. Doctors reached agreement (host_measurement == '#结束#')
+        # 2. analyze_discussion_state indicates we should query patient for missing key information
+        turn_1_new_info = None
+        query_text = initial_analysis.get('query', '').strip()
+        if host_measurement == '#结束#' and initial_analysis.get('action') == 'query_patient' and query_text:
+            # Doctors agree, but host identified missing key information
+            if self.ff_print:
+                print(f"\n[Host Query to Patient - Turn 1]")
+                print(f"Reason: Doctors agree but lack key information")
+                print(f"Question: {query_text}")
+
+            # Patient responds to the query
+            new_info = discussion_patient.speak(
+                role="医生",
+                content=query_text,
+                save_to_memory=True)
+
+            additional_info_gathered.append({
+                "turn": 1,
+                "type": "patient_query",
+                "query": query_text,
+                "response": new_info
+            })
+            turn_1_new_info = f"患者补充信息：{new_info}"
+
+            if self.ff_print:
+                print(f"[Patient Response]")
+                print(f"{new_info}\n")
+        elif host_measurement == '#结束#' and initial_analysis.get('action') == 'query_patient' and not query_text:
+            # Host wanted to query but didn't provide question - log warning
+            if self.ff_print:
+                print(f"\n[WARNING] Host decided to query patient but provided no question at Turn 1.")
+
+        # Determine initial host decision based on agreement and analysis
+        if host_measurement == '#结束#':
+            if turn_1_new_info:
+                # Doctors agreed but got new info from patient, need to update diagnosis
+                initial_host_decision = {
+                    "action": "update_with_patient_info",
+                    "reason": 'Doctors agree but patient provided additional key information. Final diagnosis will incorporate this.',
+                    "query": None
+                }
+            elif initial_analysis.get('action') == 'query_patient':
+                # Host wanted to query patient but no query was provided or query failed
+                # Begin discussion to resolve the missing information issue
+                initial_host_decision = {
+                    "action": "begin_discussion",
+                    "reason": initial_analysis.get('reason', 'Need additional information. Doctors should discuss to clarify.'),
+                    "query": None
+                }
+            elif initial_analysis.get('action') == 'finalize':
+                # Doctors agreed and analysis confirms we can finalize
+                initial_host_decision = {
+                    "action": "finalize",
+                    "reason": initial_analysis.get('reason', 'Doctors have reached agreement after initial consultation.'),
+                    "query": None
+                }
+            else:
+                # measure_agreement says consensus but analyze_discussion_state suggests continue
+                # Begin discussion to resolve inconsistency
+                initial_host_decision = {
+                    "action": "begin_discussion",
+                    "reason": initial_analysis.get('reason', 'Further discussion needed despite initial agreement.'),
+                    "query": None
+                }
+        else:
+            # Doctors have conflicts, begin discussion (no patient query here)
+            initial_host_decision = {
+                "action": "begin_discussion",
+                "reason": initial_analysis.get('reason', 'Doctors have different diagnoses. Discussion begins to reach consensus.'),
+                "query": None
+            }
+
+        # Add Turn 1 to discussion history with initial reports
+        diagnosis_in_discussion.append({
+            "turn": 1,
+            "diagnosis_in_turn": initial_diagnosis_in_turn,
+            "host_critique": host_measurement,
+            "host_decision": initial_host_decision,
+            "new_information": turn_1_new_info
+        })
+
+        if self.ff_print:
+            print(f"  Agreement Status: {host_measurement}")
+            print(f"  Host Decision: {initial_host_decision['action']}")
+            print("-"*100)
+
+        # Turn 1 Phase 2: If discussion begins OR need to update with patient info, doctors revise
+        if host_measurement != '#结束#' and initial_host_decision['action'] == 'begin_discussion':
+            # Doctors have conflicts, they revise based on discussion
+            if self.ff_print:
+                print(f"\n[Phase 2 - Turn 1]: Doctors revise diagnosis based on consolidated summary and discussion\n")
+
+            # Doctors revise their diagnoses
+            turn_1_revised_diagnoses = []
+            for i, doctor in enumerate(self.doctors):
+                # Standard revision based on consolidated summary
+                doctor.revise_diagnosis_by_symptom_and_examination(
+                    discussion_patient, initial_symptom_and_examination)
+
+                revised_diagnosis = doctor.get_diagnosis_by_patient_id(discussion_patient.id)
+                turn_1_revised_diagnoses.append({
+                    "doctor_id": i,
+                    "doctor_engine_name": doctor.engine.model_name,
+                    "diagnosis": revised_diagnosis
+                })
+
+                if self.ff_print:
+                    diagnosis_result = revised_diagnosis.get("诊断结果", "N/A") if revised_diagnosis else "N/A"
+                    print(f"  [Doctor {doctor.name}({doctor.engine.model_name})]: {diagnosis_result}")
+
+            # Update Turn 1 with revised diagnoses (these will be used in Turn 2 Phase 1)
+            diagnosis_in_discussion[0]["revised_diagnoses"] = turn_1_revised_diagnoses
+
+        elif host_measurement == '#结束#' and initial_host_decision['action'] == 'update_with_patient_info':
+            # Doctors agreed but got new patient info, update their diagnoses
+            if self.ff_print:
+                print(f"\n[Phase 2 - Turn 1]: Doctors update diagnosis with patient's additional information\n")
+
+            turn_1_revised_diagnoses = []
+            for i, doctor in enumerate(self.doctors):
+                # Update diagnosis with new patient information
+                doctor.revise_diagnosis_with_new_info(
+                    discussion_patient, turn_1_new_info, "Patient provided additional key information")
+
+                revised_diagnosis = doctor.get_diagnosis_by_patient_id(discussion_patient.id)
+                turn_1_revised_diagnoses.append({
+                    "doctor_id": i,
+                    "doctor_engine_name": doctor.engine.model_name,
+                    "diagnosis": revised_diagnosis
+                })
+
+                if self.ff_print:
+                    diagnosis_result = revised_diagnosis.get("诊断结果", "N/A") if revised_diagnosis else "N/A"
+                    print(f"  [Doctor {doctor.name}({doctor.engine.model_name})]: {diagnosis_result}")
+
+            # Update Turn 1 with revised diagnoses
+            diagnosis_in_discussion[0]["revised_diagnoses"] = turn_1_revised_diagnoses
+
+        if host_measurement != '#结束#':
+            discussion_ended = False
+            final_turn_number = 1
+            pending_patient_info = None  # Track patient info from previous turn
+            previous_host_critique = None  # Track host critique for next turn's revision
+
+            for k in range(self.max_discussion_turn):
+                current_turn = k + 2  # Start from Turn 2 since Turn 1 is already done
+                if self.ff_print:
+                    print(f"\n[Host({self.host.engine.model_name}) - Turn {current_turn} Discussion Round]")
+
+                # Check if this turn should update with pending patient info from previous turn
+                if pending_patient_info:
+                    if self.ff_print:
+                        print(f"  [Updating diagnoses with patient information from Turn {current_turn - 1}]")
+
+                    # Doctors update with patient info (this is Phase 2 of previous turn's patient query)
+                    diagnosis_in_turn = []
+                    for i, doctor in enumerate(self.doctors):
+                        doctor.revise_diagnosis_with_new_info(
+                            discussion_patient, pending_patient_info,
+                            "Incorporating additional information from patient")
+
+                        diagnosis_in_turn.append({
+                            "doctor_id": i,
+                            "doctor_engine_name": doctor.engine.model_name,
+                            "diagnosis": doctor.get_diagnosis_by_patient_id(discussion_patient.id)
+                        })
+
+                        if self.ff_print:
+                            diagnosis_dict = doctor.get_diagnosis_by_patient_id(discussion_patient.id)
+                            diagnosis_result = diagnosis_dict.get("诊断结果", "N/A") if diagnosis_dict else "N/A"
+                            print(f"  Turn {current_turn} - Doctor {doctor.name}({doctor.engine.model_name}): {diagnosis_result}")
+
+                    # After incorporating patient info, finalize
+                    host_measurement = '#结束#'
+                    turn_decision = {
+                        "action": "finalize_with_patient_info",
+                        "reason": "Doctors updated diagnosis with patient information. Finalizing.",
+                        "query": None
+                    }
+
+                    diagnosis_in_discussion.append({
+                        "turn": current_turn,
+                        "diagnosis_in_turn": diagnosis_in_turn,
+                        "host_critique": "#结束#",
+                        "host_decision": turn_decision,
+                        "new_information": None
+                    })
+
+                    discussion_ended = True
+                    final_turn_number = current_turn + 1
+                    pending_patient_info = None
+
+                    if self.ff_print:
+                        print(f"\n[Host({self.host.engine.model_name}) - Turn {current_turn} Result]")
+                        print(f"  Agreement Status: {host_measurement}")
+                        print("-"*100)
+                    # Will break at the end of loop check
+                else:
+                    # Normal discussion turn
+                    # Host analyzes discussion state and decides next action
+                    host_decision = self.host.analyze_discussion_state(
+                        self.doctors, discussion_patient, self.reporter)
+
+                    if self.ff_print:
+                        print(f"  Decision: {host_decision['action']}")
+                        print(f"  Reason: {host_decision['reason']}")
+
+                    # Check if host wants to finalize
+                    if host_decision["action"] == "finalize":
+                        # Host decides diagnosis can be finalized
+                        if self.ff_print:
+                            print("\n[Host Decision]: Finalize diagnosis - will add final reporting round\n")
+                        discussion_ended = True
+                        final_turn_number = current_turn
+
+                    # Doctors revise diagnoses (Phase 2)
+                    # Doctors revise based on:
+                    # 1. Other doctors' opinions (left_doctors)
+                    # 2. Host's critique/analysis from previous measurement (previous_host_critique)
+                    diagnosis_in_turn = []
+                    for i, doctor in enumerate(self.doctors):
+                        # Doctors revise based on other doctors' opinions + host critique
+                        left_doctors = self.doctors[:i] + self.doctors[i+1:]
+                        doctor.revise_diagnosis_by_others(
+                            discussion_patient, left_doctors, previous_host_critique,
+                            discussion_mode=self.discussion_mode)
+
+                        diagnosis_in_turn.append({
+                            "doctor_id": i,
+                            "doctor_engine_name": doctor.engine.model_name,
+                            "diagnosis": doctor.get_diagnosis_by_patient_id(discussion_patient.id)
+                        })
+                        if self.ff_print:
+                            diagnosis_dict = doctor.get_diagnosis_by_patient_id(discussion_patient.id)
+                            diagnosis_result = diagnosis_dict.get("诊断结果", "N/A") if diagnosis_dict else "N/A"
+                            print(f"  Turn {current_turn} - Doctor {doctor.name}({doctor.engine.model_name}): {diagnosis_result}")
+
+                    # Host measures agreement after revision
+                    # In "Parallel_with_Critique" mode: returns "#结束#" or critique like "(a) xxx\n(b) xxx"
+                    # In "Parallel" mode: returns "#结束#" or "#继续#"
+                    host_measurement = self.host.measure_agreement(self.doctors, discussion_patient, discussion_mode=self.discussion_mode)
+
+                    # Determine if consensus was reached
+                    consensus_reached = "#结束#" in host_measurement or host_measurement == "#结束#"
+
+                    # Extract the critique for storing and for next turn
+                    if self.discussion_mode == "Parallel_with_Critique" and not consensus_reached:
+                        # host_measurement contains the critique like "(a) xxx\n(b) xxx"
+                        current_host_critique = host_measurement
+                    else:
+                        # In Parallel mode or when consensus reached, no detailed critique
+                        current_host_critique = host_measurement
+
+                    # Save critique for next turn's doctor revision
+                    previous_host_critique = current_host_critique
+
+                    # If doctors reached consensus, check if key information is missing
+                    turn_new_info = None
+                    if consensus_reached:
+                        # Doctors now agree, but check if we're missing key information
+                        consensus_analysis = self.host.analyze_discussion_state(
+                            self.doctors, discussion_patient, self.reporter)
+
+                        # Check if host wants to query patient
+                        query_text = consensus_analysis.get('query', '').strip()
+                        if consensus_analysis.get('action') == 'query_patient' and query_text:
+                            # Doctors agree but lack key info, query patient
+                            if self.ff_print:
+                                print(f"\n[Host Query to Patient - Turn {current_turn}]")
+                                print(f"Reason: Doctors reached consensus but lack key information")
+                                print(f"Question: {query_text}")
+
+                            # Patient responds to the query
+                            new_info = discussion_patient.speak(
+                                role="医生",
+                                content=query_text,
+                                save_to_memory=True)
+
+                            additional_info_gathered.append({
+                                "turn": current_turn,
+                                "type": "patient_query",
+                                "query": query_text,
+                                "response": new_info
+                            })
+                            turn_new_info = f"患者补充信息：{new_info}"
+
+                            if self.ff_print:
+                                print(f"[Patient Response]")
+                                print(f"{new_info}\n")
+
+                            # Save for next turn
+                            pending_patient_info = turn_new_info
+                        elif consensus_analysis.get('action') == 'query_patient' and not query_text:
+                            # Host wants to query patient but didn't provide a question
+                            # This shouldn't happen, but if it does, log warning and continue discussion
+                            if self.ff_print:
+                                print(f"\n[WARNING] Host decided to query patient but provided no question. Continuing discussion.")
+                            # Don't set turn_new_info, will be handled in decision logic below
+
+                    # Determine next host decision for this turn
+                    if consensus_reached:
+                        if turn_new_info:
+                            # Reached consensus but got new patient info, need one more revision
+                            turn_decision = {
+                                "action": "update_with_patient_info",
+                                "reason": "Doctors reached consensus but patient provided additional key information. Need to update diagnosis.",
+                                "query": None
+                            }
+                            # Don't end discussion yet, need one more turn to incorporate patient info
+                            discussion_ended = False
+                        elif consensus_analysis.get('action') == 'query_patient':
+                            # Host wanted to query patient but no query was provided or query failed
+                            # Continue discussion to try to resolve missing information through doctor discussion
+                            turn_decision = {
+                                "action": "continue_discussion",
+                                "reason": consensus_analysis.get("reason", "Need additional information but unable to query patient. Doctors should discuss further."),
+                                "query": None
+                            }
+                            discussion_ended = False
+                            consensus_reached = False  # Override to continue discussion
+                        elif consensus_analysis.get('action') == 'finalize':
+                            # Consensus confirmed by both measure_agreement and analyze_discussion_state
+                            turn_decision = {
+                                "action": "finalize_after_discussion",
+                                "reason": consensus_analysis.get("reason", "Doctors have reached consensus after discussion."),
+                                "query": None
+                            }
+                            discussion_ended = True
+                            final_turn_number = current_turn + 1
+                        else:
+                            # measure_agreement says consensus, but analyze_discussion_state suggests continue_discussion
+                            # This can happen if LLM responses are inconsistent or there are remaining issues
+                            turn_decision = {
+                                "action": "continue_discussion",
+                                "reason": consensus_analysis.get("reason", "Further discussion needed to resolve remaining issues."),
+                                "query": None
+                            }
+                            discussion_ended = False
+                            # Override consensus_reached to continue the discussion
+                            consensus_reached = False
+                    else:
+                        turn_decision = {
+                            "action": "continue_discussion",
+                            "reason": host_decision["reason"],
+                            "query": None
+                        }
+
+                    diagnosis_in_discussion.append({
+                        "turn": current_turn,
+                        "diagnosis_in_turn": diagnosis_in_turn,
+                        "host_critique": current_host_critique,  # Store the current critique
+                        "host_decision": turn_decision,
+                        "new_information": turn_new_info
+                    })
+
+                    if self.ff_print:
+                        print(f"\n[Host({self.host.engine.model_name}) - Turn {current_turn} Result]")
+                        print(f"  Agreement Status: {host_measurement}")
+                        print("-"*100)
+
+                # Check if discussion should end or continue with patient info
+                if discussion_ended:
+                    # discussion_ended is False if we need to incorporate patient info
+                    # discussion_ended is True if consensus reached and no patient info needed
+                    if self.ff_print:
+                        print(f"[Host({self.host.engine.model_name})]: Discussion ending - finalizing consultation\n")
+
+                    # Add final reporting round (Phase 1 only, no Phase 2)
+                    final_diagnosis_in_turn = []
+                    for i, doctor in enumerate(self.doctors):
+                        final_diagnosis_in_turn.append({
+                            "doctor_id": i,
+                            "doctor_engine_name": doctor.engine.model_name,
+                            "diagnosis": doctor.get_diagnosis_by_patient_id(discussion_patient.id)
+                        })
+
+                    # Host generates final diagnosis dict (includes症状, 辅助检查, 诊断结果, 诊断依据, 治疗方案)
+                    # This ensures all information gathered during discussion is included
+                    final_diagnosis = self.host.finalize_consultation(
+                        self.doctors, discussion_patient, self.reporter,
+                        initial_summary_result, additional_info_gathered)
+
+                    if self.ff_print:
+                        print(f"[Host({self.host.engine.model_name}) - Final Diagnosis (Complete)]:")
+                        for key, value in final_diagnosis.items():
+                            if value:
+                                print(f"\n{key}:")
+                                print(f"{value}")
+                        print()
+
+                    final_host_decision = {
+                        "action": "finalize",
+                        "reason": "Discussion ends. Doctors have reached consensus or sufficient information has been gathered.",
+                        "query": None
+                    }
+
+                    diagnosis_in_discussion.append({
+                        "turn": final_turn_number,
+                        "diagnosis_in_turn": final_diagnosis_in_turn,
+                        "host_critique": "#结束#",
+                        "host_decision": final_host_decision,
+                        "new_information": None,
+                        "final_diagnosis_by_host": final_diagnosis  # Host's final summary
+                    })
+
+                    if self.ff_print:
+                        print(f"[Host({self.host.engine.model_name}) - Final Round {final_turn_number}]")
+                        print(f"  Host Decision: Discussion ends")
+                        print("-"*100)
+                    break
+                elif turn_new_info:
+                    # Got patient info, need one more turn to incorporate it
+                    # Continue loop to next iteration (Turn N+1)
+                    if self.ff_print:
+                        print(f"[Host({self.host.engine.model_name})]: Patient provided additional info - doctors will update in next turn\n")
+                    # The next iteration will be Turn N+1 where doctors update with patient info
+                    continue
+        else:
+            # No discussion needed - doctors already agreed after initial consultation
+            if self.ff_print:
+                print(f"[Host({self.host.engine.model_name})]: Doctors already reached agreement after initial consultation - finalizing directly\n")
+            final_turn_number = 1
+
+            # Host generates final diagnosis dict (includes all fields)
+            final_diagnosis = self.host.finalize_consultation(
+                self.doctors, discussion_patient, self.reporter,
+                initial_summary_result, additional_info_gathered)
+
+            if self.ff_print:
+                print(f"[Host({self.host.engine.model_name}) - Final Diagnosis (Complete, No Discussion Needed)]:")
+                for key, value in final_diagnosis.items():
+                    if value:
+                        print(f"\n{key}:")
+                        print(f"{value}")
+                print()
+
+        # Fallback: If final results weren't set (shouldn't happen, but safety check)
+        if final_diagnosis is None:
+            if self.ff_print:
+                print(f"[WARNING] Final diagnosis not set - generating now as fallback\n")
+
+            final_diagnosis = self.host.finalize_consultation(
+                self.doctors, discussion_patient, self.reporter,
+                initial_summary_result, additional_info_gathered)
+
+            if self.ff_print:
+                print(f"[Host({self.host.engine.model_name}) - Final Diagnosis (Complete)]:")
+                for key, value in final_diagnosis.items():
+                    if value:
+                        print(f"\n{key}:")
+                        print(f"{value}")
+                print()
+
+        if self.ff_print:
             print("="*100)
         diagnosis_info = {
-            "patient_id": patient.id, "final_turn": k+1, "diagnosis": final_diagnosis,
-            "symptom_and_examination": symptom_and_examination,
-            "doctor_database": self.args.doctor_database, "doctor_ids": [doctor.id for doctor in self.doctors], 
+            "patient_id": discussion_patient.id,
+            "initial_consultations": initial_dialog_histories,
+            "additional_info_gathered": additional_info_gathered,
+            "final_turn": final_turn_number,
+            "diagnosis": final_diagnosis,  # Now includes症状, 辅助检查, 诊断结果, 诊断依据, 治疗方案
+            "diagnosis_in_discussion": diagnosis_in_discussion,
+            "doctor_database": self.args.doctor_database,
+            "doctor_names": [doctor.name for doctor in self.doctors],
             "doctor_engine_names": [doctor.engine.model_name for doctor in self.doctors],
-            "host": self.args.host, "host_engine_name": self.host.engine.model_name,
-            "patient": self.args.patient, "patient_engine_name": patient.engine.model_name,
-            "reporter": self.args.reporter, "reporter_engine_name": self.reporter.engine.model_name,
+            "host": self.args.host,
+            "host_engine_name": self.host.engine.model_name,
+            "patient": self.args.patient,
+            "patient_engine_name": patient.engine.model_name,
+            "reporter": self.args.reporter,
+            "reporter_engine_name": self.reporter.engine.model_name,
             "time": self.start_time,
         }
         self.save_info(diagnosis_info)

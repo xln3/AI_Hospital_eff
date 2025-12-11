@@ -1,13 +1,14 @@
 from .base_agent import Agent
 from .doctor import (
-    Doctor, 
-    GPTDoctor, 
-    ChatGLMDoctor, 
-    MinimaxDoctor, 
-    WenXinDoctor, 
-    QwenDoctor, 
+    Doctor,
+    GPTDoctor,
+    ChatGLMDoctor,
+    MinimaxDoctor,
+    WenXinDoctor,
+    QwenDoctor,
     HuatuoGPTDoctor,
-    HFDoctor
+    HFDoctor,
+    AiHubMixDoctor
 )
 from .patient import Patient
 from .reporter import Reporter, ReporterV2
@@ -22,8 +23,9 @@ __all__ = [
     "MinimaxDoctor",
     "WenXinDoctor",
     "QwenDoctor",
-    "huaTuoGPTDoctor",
+    "HuatuoGPTDoctor",
     "HFDoctor",
+    "AiHubMixDoctor",
     "Patient",
     "Reporter",
     "ReporterV2",

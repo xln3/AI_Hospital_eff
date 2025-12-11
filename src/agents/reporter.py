@@ -32,7 +32,7 @@ class Reporter(Agent):
         parser.add_argument('--reporter_openai_api_base', type=str, help='API base for OpenAI')
         parser.add_argument('--reporter_openai_model_name', type=str, help='API model name for OpenAI')
         parser.add_argument('--reporter_temperature', type=float, default=0.0, help='temperature')
-        parser.add_argument('--reporter_max_tokens', type=int, default=2048, help='max tokens')
+        parser.add_argument('--reporter_max_tokens', type=int, default=16384, help='max tokens (higher for reasoning models like gpt-5-nano)')
         parser.add_argument('--reporter_top_p', type=float, default=1, help='top p')
         parser.add_argument('--reporter_frequency_penalty', type=float, default=0, help='frequency penalty')
         parser.add_argument('--reporter_presence_penalty', type=float, default=0, help='presence penalty')
@@ -43,19 +43,25 @@ class Reporter(Agent):
             f"#查体#\n{medical_records['查体'].strip()}\n" + \
             f"#辅助检查#\n{medical_records['辅助检查'].strip()}\n\n" + \
             "下面会有病人或者医生来查询，你要忠实地按照收到的检查结果，找到对应的项目，并按照下面的格式来回复。\n\n" + \
-            "#检查项目#\n- xxx: xxx\n- xxx: xxx\n#xx检查#\n- xxx: xxx\n- xxx: xxx\n\n" + \
-            "如果无法查询到对应的检查项目则回复：\n" + \
-            "- xxx: 无异常"
-        
+            "回复格式：\n" + \
+            "#检查项目#\n" + \
+            "- 项目名称1: 结果详情\n" + \
+            "- 项目名称2: 结果详情\n\n" + \
+            "规则：\n" + \
+            "1. 严格按照收到的检查结果回复，如实报告数据\n" + \
+            "2. 如果某个检查项目在记录中找不到，回复：项目名称: 无异常\n" + \
+            "3. 列出患者/医生询问的所有检查项目\n" + \
+            "4. 只使用 #检查项目# 作为唯一的章节标题"
+
         messages = [
             {"role": "system", "content": system_message},
-            {"role": "user", "content": "您好，我需要做基因组测序，能否告诉我这些检查结果？"},
-            {"role": "assistant", "content": "#检查项目#\n- 基因组测序"},
+            {"role": "user", "content": "您好，我需要查询血糖、血常规和基因组测序的检查结果。"},
+            {"role": "assistant", "content": "#检查项目#\n- 血糖: 8.4 mmol/L\n- 血常规: 白细胞 4.97×10^9/L, 中性粒细胞 2.42×10^9/L\n- 基因组测序: 无异常"},
             {"role": "user", "content": content}
         ]
-        
-        responese = self.engine.get_response(messages)
-        return responese
+
+        response = self.engine.get_response(messages)
+        return response
     
     @staticmethod
     def parse_content(response):
@@ -94,7 +100,7 @@ class ReporterV2(Agent):
         parser.add_argument('--reporter_openai_api_base', type=str, help='API base for OpenAI')
         parser.add_argument('--reporter_openai_model_name', type=str, help='API model name for OpenAI')
         parser.add_argument('--reporter_temperature', type=float, default=0.0, help='temperature')
-        parser.add_argument('--reporter_max_tokens', type=int, default=2048, help='max tokens')
+        parser.add_argument('--reporter_max_tokens', type=int, default=16384, help='max tokens (higher for reasoning models like gpt-5-nano)')
         parser.add_argument('--reporter_top_p', type=float, default=1, help='top p')
         parser.add_argument('--reporter_frequency_penalty', type=float, default=0, help='frequency penalty')
         parser.add_argument('--reporter_presence_penalty', type=float, default=0, help='presence penalty')

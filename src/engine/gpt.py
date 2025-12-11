@@ -33,6 +33,7 @@ class GPTEngine(Engine):
     def get_response(self, messages):
         model_name = self.model_name
         i = 0
+        response = None
         while i < 5:
             try:
                 response = self.client.chat.completions.create(
@@ -45,19 +46,36 @@ class GPTEngine(Engine):
                     presence_penalty=self.presence_penalty
                 )
                 break
-            except openai.BadRequestError:
+            except openai.BadRequestError as e:
+                # Try with max_completion_tokens if max_tokens fails
+                if "max_tokens" in str(e):
+                    try:
+                        response = self.client.chat.completions.create(
+                            model=model_name,
+                            messages=messages,
+                            temperature=self.temperature,
+                            max_completion_tokens=self.max_tokens,
+                            top_p=self.top_p,
+                            frequency_penalty=self.frequency_penalty,
+                            presence_penalty=self.presence_penalty
+                        )
+                        break
+                    except Exception:
+                        pass
                 if model_name == "gpt-3.5-turbo":
                     model_name = "gpt-3.5-turbo-16k"
                 i += 1
-            except openai.RateLimitError:
+            except openai.RateLimitError as e:
+                print(f"[Retry {i+1}/5] RateLimitError: {e}. Sleeping 10s...")
                 time.sleep(10)
                 i += 1
             except Exception as e:
-                print(e)
+                error_type = type(e).__name__
+                print(f"[Retry {i+1}/5] {error_type}: {e}. Sleeping 5s...")
                 i += 1
                 time.sleep(5)
                 continue
-            # else:
-            #     i += 1
+        if response is None:
+            raise Exception(f"Failed to get response after 5 retries")
         return response.choices[0].message.content
 
