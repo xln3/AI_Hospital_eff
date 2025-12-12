@@ -144,18 +144,32 @@ class Evaluator:
         self.patient_ids = list(self.reference_diagnosis.keys())
 
         self.doctor_name_to_diagnosis = {}
-        for doctor_name, doctor_diagnosis_filepath in [
-                ("2_Agent_GPT3_GPT4_Critique", "../outputs/collaboration_history_iiyi/doctors_2_agent_gpt3_gpt4_parallel_with_critique_discussion_history.jsonl"),
-            ]:
-            self.doctor_name_to_diagnosis[doctor_name] = self.load_collaborative_discussion_diagnosis(doctor_diagnosis_filepath)
+        # Default path for collaborative discussion results
+        default_path = "outputs/test_online_named_doctors_discussion.jsonl"
+
+        # Check if diagnosis file exists
+        if os.path.exists(default_path):
+            self.doctor_name_to_diagnosis["Collaborative_Discussion"] = self.load_collaborative_discussion_diagnosis(default_path)
+        else:
+            # Try parent directory relative path
+            alt_path = "../outputs/test_online_named_doctors_discussion.jsonl"
+            if os.path.exists(alt_path):
+                self.doctor_name_to_diagnosis["Collaborative_Discussion"] = self.load_collaborative_discussion_diagnosis(alt_path)
+            else:
+                print(f"[WARNING] Collaborative discussion diagnosis file not found at {default_path} or {alt_path}")
 
     def load_collaborative_discussion_diagnosis(self, doctor_diagnosis_filepath):
         patient_id_to_diagnosis = {}
         with jsonlines.open(doctor_diagnosis_filepath, "r") as reader:
             for obj in reader:
+                # Extract final diagnosis from collaborative consultation output
+                diagnosis_dict = obj.get("diagnosis", {})
                 patient_id_to_diagnosis[obj["patient_id"]] = {
                     "patient_id": obj["patient_id"],
-                    "diagnosis": obj["diagnosis"],
+                    "diagnosis": diagnosis_dict,
+                    "doctor_names": obj.get("doctor_names", []),
+                    "doctor_engine_names": obj.get("doctor_engine_names", []),
+                    "host_engine_name": obj.get("host_engine_name", ""),
                 }
         reader.close()
         return patient_id_to_diagnosis
@@ -230,6 +244,9 @@ class Evaluator:
     def evaluate_one(self, evaluate_args):
         reference_diagnosis, doctor_diagnosis = evaluate_args.get("reference_diagnosis"), evaluate_args.get("doctor_diagnosis")
 
+        # Handle both old format (string) and new format (dict) for doctor_diagnosis
+        doctor_diagnosis_str = self._format_doctor_diagnosis(doctor_diagnosis.get("diagnosis"))
+
         statement = "# 专家诊疗结果\n" + \
             "## 现病史\n" + \
             "{}\n".format(reference_diagnosis.get("symptom")) + \
@@ -242,8 +259,8 @@ class Evaluator:
             "## 治疗方案\n" + \
             "{}\n\n".format(reference_diagnosis.get("treatment")) + \
             "# 实习医生诊疗结果\n" + \
-            "{}".format(doctor_diagnosis["diagnosis"])
-        
+            "{}".format(doctor_diagnosis_str)
+
         messages = self.get_messages(statement)
         response = self.get_response(messages)
         struct_result = self.parse_response(response)
@@ -251,6 +268,36 @@ class Evaluator:
         with jsonlines.open(self.eval_save_filepath, "a") as writer:
             writer.write(evaluate_args)
         writer.close()
+        return evaluate_args
+
+    @staticmethod
+    def _format_doctor_diagnosis(diagnosis):
+        """
+        Format doctor diagnosis from either dict or string format.
+
+        Args:
+            diagnosis: Either a string (old format) or dict (new collaborative format)
+
+        Returns:
+            Formatted string for evaluation
+        """
+        if isinstance(diagnosis, dict):
+            # New collaborative consultation format with structured diagnosis
+            parts = []
+            if diagnosis.get("症状"):
+                parts.append("症状:\n" + str(diagnosis.get("症状")))
+            if diagnosis.get("辅助检查"):
+                parts.append("辅助检查:\n" + str(diagnosis.get("辅助检查")))
+            if diagnosis.get("诊断结果"):
+                parts.append("诊断结果:\n" + str(diagnosis.get("诊断结果")))
+            if diagnosis.get("诊断依据"):
+                parts.append("诊断依据:\n" + str(diagnosis.get("诊断依据")))
+            if diagnosis.get("治疗方案"):
+                parts.append("治疗方案:\n" + str(diagnosis.get("治疗方案")))
+            return "\n\n".join(parts) if parts else str(diagnosis)
+        else:
+            # Old format - already a string
+            return str(diagnosis)
         
     @staticmethod
     def parse_response(response):
@@ -355,6 +402,137 @@ class Evaluator:
                 i += 1
         return response.choices[0].message.content
 
+    def print_evaluation_results(self):
+        """
+        Load evaluation results from file and compute aggregate metrics.
+        Prints results grouped by doctor_name.
+        """
+        if not os.path.exists(self.eval_save_filepath):
+            print(f"[ERROR] Evaluation results file not found: {self.eval_save_filepath}")
+            return
+
+        # Group results by doctor_name
+        doctor_results = {}
+
+        with jsonlines.open(self.eval_save_filepath, "r") as reader:
+            for obj in reader:
+                doctor_name = obj.get("doctor_name", "Unknown")
+                if doctor_name not in doctor_results:
+                    doctor_results[doctor_name] = []
+                doctor_results[doctor_name].append(obj)
+
+        # Print results for each doctor
+        for doctor_name in sorted(doctor_results.keys()):
+            results = doctor_results[doctor_name]
+            print("\n" + "="*100)
+            print(f"Evaluation Results for: {doctor_name}")
+            print("="*100)
+
+            # Initialize counters for choice-based metrics
+            choice_counts = {
+                "sympton_choice": {"A": 0, "B": 0, "C": 0, "D": 0, "total": 0},
+                "test_choice": {"A": 0, "B": 0, "C": 0, "D": 0, "total": 0},
+                "diagnosis_choice": {"A": 0, "B": 0, "C": 0, "D": 0, "total": 0},
+                "basis_choice": {"A": 0, "B": 0, "C": 0, "D": 0, "total": 0},
+                "treatment_choice": {"A": 0, "B": 0, "C": 0, "D": 0, "total": 0},
+            }
+
+            # Aggregate metrics
+            total_patients = len(results)
+
+            for result in results:
+                # Count choice distribution
+                for choice_key in choice_counts.keys():
+                    choice_value = result.get(choice_key)
+                    if choice_value:
+                        choice_counts[choice_key][choice_value] += 1
+                        choice_counts[choice_key]["total"] += 1
+
+            # Print summary statistics
+            print(f"\nTotal Patients Evaluated: {total_patients}")
+            print(f"Model used for evaluation: {self.model_name}")
+            print("\n" + "-"*100)
+            print("Evaluation Metrics Distribution:")
+            print("-"*100)
+
+            # Print each metric's distribution
+            metrics_labels = {
+                "sympton_choice": "Symptom Comprehension",
+                "test_choice": "Medical Examination Completeness",
+                "diagnosis_choice": "Diagnosis Consistency",
+                "basis_choice": "Diagnostic Basis Consistency",
+                "treatment_choice": "Treatment Plan Consistency"
+            }
+
+            for metric_key, metric_label in metrics_labels.items():
+                counts = choice_counts[metric_key]
+                total = counts["total"]
+                if total == 0:
+                    print(f"\n{metric_label}: No data")
+                    continue
+
+                print(f"\n{metric_label}:")
+                print(f"  Total evaluated: {total}/{total_patients}")
+
+                # Calculate percentages
+                for choice in ["A", "B", "C", "D"]:
+                    count = counts[choice]
+                    percentage = (count / total * 100) if total > 0 else 0
+                    choice_label = self._get_choice_label(choice, metric_key)
+                    print(f"    {choice} ({choice_label}): {count:3d} ({percentage:6.2f}%)")
+
+            # Print detailed patient-level results
+            print("\n" + "-"*100)
+            print("Detailed Patient Evaluations:")
+            print("-"*100)
+            for i, result in enumerate(results, 1):
+                patient_id = result.get("patient_id", "Unknown")
+                print(f"\nPatient {i} (ID: {patient_id}):")
+                print(f"  Symptom: {result.get('sympton_choice', 'N/A')}")
+                print(f"  Medical Tests: {result.get('test_choice', 'N/A')}")
+                print(f"  Diagnosis: {result.get('diagnosis_choice', 'N/A')}")
+                print(f"  Basis: {result.get('basis_choice', 'N/A')}")
+                print(f"  Treatment: {result.get('treatment_choice', 'N/A')}")
+
+            print("\n" + "="*100)
+
+    @staticmethod
+    def _get_choice_label(choice, metric_key):
+        """Get human-readable label for choice values."""
+        labels = {
+            "sympton_choice": {
+                "A": "Fully Comprehensive",
+                "B": "Substantially Comprehensive",
+                "C": "Partially Comprehensive",
+                "D": "Mostly Deficient"
+            },
+            "test_choice": {
+                "A": "Very Complete",
+                "B": "Substantially Complete",
+                "C": "Partially Complete",
+                "D": "Mostly Incomplete"
+            },
+            "diagnosis_choice": {
+                "A": "Completely Consistent/Correct",
+                "B": "Substantially Consistent/Basically Correct",
+                "C": "Partially Consistent/Errors Present",
+                "D": "Completely Inconsistent/Completely Wrong"
+            },
+            "basis_choice": {
+                "A": "Completely Consistent",
+                "B": "Substantially Consistent",
+                "C": "Partially Consistent",
+                "D": "Completely Inconsistent"
+            },
+            "treatment_choice": {
+                "A": "Completely Consistent",
+                "B": "Substantially Consistent",
+                "C": "Partially Consistent",
+                "D": "Completely Inconsistent"
+            }
+        }
+        return labels.get(metric_key, {}).get(choice, "Unknown")
+
 
 def get_args():
     # add args for running
@@ -385,9 +563,15 @@ if __name__ == "__main__":
     else:
         evaluator.build_onestep_platform()
 
+    print(f"\n[INFO] Starting evaluation with platform: {args.evaluation_platform}")
+    print(f"[INFO] Evaluation results will be saved to: {args.eval_save_filepath}")
+    print(f"[INFO] Doctor names being evaluated: {', '.join(args.doctor_names)}")
+
     if not args.parallel:
         evaluator.evaluate()
     else:
         evaluator.parallel_evaluate()
 
-                
+    print("\n[INFO] Evaluation completed. Processing results...")
+    evaluator.print_evaluation_results()
+

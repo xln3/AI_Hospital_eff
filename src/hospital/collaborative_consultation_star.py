@@ -11,8 +11,16 @@ import copy
 from utils.register import registry, register_class
 
 
-@register_class(alias="Scenario.CollaborativeConsultation")
-class CollaborativeConsultation:
+@register_class(alias="Scenario.CollaborativeConsultationStar")
+class CollaborativeConsultationStar:
+    """
+    STAR Mode: Doctors do not see each other's diagnoses during discussion.
+    Each doctor only receives host's critique and revises based on that.
+
+    Key difference from CollaborativeConsultation:
+    - revise_diagnosis_by_others() is called with empty list for other_doctors
+    - Doctors revise based ONLY on host's critique, not on other doctors' opinions
+    """
     def __init__(self, args):
         patient_database = json.load(open(args.patient_database))
         self.args = args
@@ -44,7 +52,7 @@ class CollaborativeConsultation:
                 patient_id=patient_profile["id"],
             )
             self.patients.append(patient)
-    
+
         self.reporter = registry.get_class(args.reporter)(args)
         self.host = registry.get_class(args.host)(args)
 
@@ -523,7 +531,7 @@ class CollaborativeConsultation:
         self.remove_processed_patients()
         for patient in tqdm(self.patients):
             self._run(patient)
-    
+
     def parallel_run(self):
         self.remove_processed_patients()
         st = time.time()
@@ -536,7 +544,7 @@ class CollaborativeConsultation:
             for _ in tqdm(concurrent.futures.as_completed(futures), total=len(self.patients)):
                 pass
         print("duration: ", time.time() - st)
-    
+
     def _run(self, patient):
         # NEW: Initial consultation phase
         # Generate diagnoses online from each doctor consulting with patient independently
@@ -579,7 +587,7 @@ class CollaborativeConsultation:
 
         if self.ff_print:
             print("="*100)
-            print(f"\n### Collaborative Discussion ({self.discussion_mode} mode) ###\n")
+            print(f"\n### Collaborative Discussion (STAR Mode - Doctors Don't See Each Other) ###\n")
 
         # Initialize discussion tracking
         diagnosis_in_discussion = []
@@ -717,21 +725,22 @@ class CollaborativeConsultation:
         # Turn 1 Phase 2: If discussion begins OR need to update with patient info, doctors revise
         if host_measurement != '#结束#' and initial_host_decision['action'] == 'begin_discussion':
             # Doctors have conflicts, they revise based on discussion
+            # STAR MODE: Doctors revise based ONLY on host's critique, not other doctors' opinions
             if self.ff_print:
-                print(f"\n[Phase 2 - Turn 1]: Doctors revise diagnosis based on other doctors' opinions and host's analysis\n")
+                print(f"\n[Phase 2 - Turn 1]: Doctors revise diagnosis based on host's critique (STAR Mode - no other doctors' diagnoses)\n")
 
             # Prepare host's analysis as critique for doctors to consider
-            # Use the detailed analysis from analyze_discussion_state (17667 tokens) instead of just measurement marker
+            # Use the detailed analysis from analyze_discussion_state instead of just measurement marker
             host_critique_for_revision = initial_analysis.get('reason', '')
 
             # Doctors revise their diagnoses
             turn_1_revised_diagnoses = []
             for i, doctor in enumerate(self.doctors):
-                # Revise diagnosis based on other doctors' opinions and host's analysis
-                # This passes the full host analysis (17667 tokens) to doctors
+                # STAR MODE: Pass empty list for other_doctors
+                # Doctors revise based ONLY on host's analysis, not on other doctors' opinions
                 doctor.revise_diagnosis_by_others(
                     discussion_patient,
-                    [d for j, d in enumerate(self.doctors) if j != i],  # other doctors
+                    [],  # STAR MODE: Empty list - doctors don't see other doctors' diagnoses
                     host_critique=host_critique_for_revision,
                     discussion_mode=self.discussion_mode,
                     current_turn=1)
@@ -741,13 +750,11 @@ class CollaborativeConsultation:
                     self._print_doctor_tokens(doctor, discussion_patient.id, current_turn=1)
 
                 revised_diagnosis = doctor.get_diagnosis_by_patient_id(discussion_patient.id)
-                # REGULAR MODE: doctors see host + other doctors' diagnoses
-                other_doctor_names = [self.doctors[idx].name for idx in range(len(self.doctors)) if idx != i]
                 turn_1_revised_diagnoses.append({
                     "doctor_id": i,
                     "doctor_engine_name": doctor.engine.model_name,
                     "diagnosis": revised_diagnosis,
-                    "received_from": ["host"] + other_doctor_names  # REGULAR MODE: sees host and other doctors
+                    "received_from": ["host"]  # STAR MODE: only receives host's critique, not other doctors
                 })
 
                 if self.ff_print:
@@ -773,13 +780,11 @@ class CollaborativeConsultation:
                     self._print_doctor_tokens(doctor, discussion_patient.id, current_turn=1)
 
                 revised_diagnosis = doctor.get_diagnosis_by_patient_id(discussion_patient.id)
-                # REGULAR MODE: doctors see host + patient info + other doctors' diagnoses
-                other_doctor_names = [self.doctors[idx].name for idx in range(len(self.doctors)) if idx != i]
                 turn_1_revised_diagnoses.append({
                     "doctor_id": i,
                     "doctor_engine_name": doctor.engine.model_name,
                     "diagnosis": revised_diagnosis,
-                    "received_from": ["host", "patient"] + other_doctor_names
+                    "received_from": ["host", "patient"]  # Updates with patient info
                 })
 
                 if self.ff_print:
@@ -816,13 +821,11 @@ class CollaborativeConsultation:
                         if self.ff_print:
                             self._print_doctor_tokens(doctor, discussion_patient.id, current_turn=current_turn)
 
-                        # REGULAR MODE: doctors see host + patient info + other doctors' diagnoses
-                        other_doctor_names = [self.doctors[idx].name for idx in range(len(self.doctors)) if idx != i]
                         diagnosis_in_turn.append({
                             "doctor_id": i,
                             "doctor_engine_name": doctor.engine.model_name,
                             "diagnosis": doctor.get_diagnosis_by_patient_id(discussion_patient.id),
-                            "received_from": ["host", "patient"] + other_doctor_names
+                            "received_from": ["host", "patient"]  # STAR MODE: updated with patient info
                         })
 
                         if self.ff_print:
@@ -878,29 +881,27 @@ class CollaborativeConsultation:
                         final_turn_number = current_turn
 
                     # Doctors revise diagnoses (Phase 2)
-                    # Doctors revise based on:
-                    # 1. Other doctors' opinions (left_doctors)
-                    # 2. Host's detailed analysis from current turn (host_decision['reason'])
+                    # STAR MODE: Doctors revise based ONLY on host's critique
                     diagnosis_in_turn = []
                     for i, doctor in enumerate(self.doctors):
-                        # Doctors revise based on other doctors' opinions + host's current analysis
-                        left_doctors = self.doctors[:i] + self.doctors[i+1:]
+                        # STAR MODE: Pass empty list for other_doctors
+                        # Doctors revise based ONLY on host's current analysis
                         doctor.revise_diagnosis_by_others(
-                            discussion_patient, left_doctors,
+                            discussion_patient,
+                            [],  # STAR MODE: Empty list - doctors don't see other doctors' diagnoses
                             host_critique=host_decision.get('reason', ''),  # Use current detailed analysis
-                            discussion_mode=self.discussion_mode, current_turn=current_turn)
+                            discussion_mode=self.discussion_mode,
+                            current_turn=current_turn)
 
                         # Print token usage
                         if self.ff_print:
                             self._print_doctor_tokens(doctor, discussion_patient.id, current_turn=current_turn)
 
-                        # REGULAR MODE: doctors see host + other doctors' diagnoses
-                        other_doctor_names = [d.name for d in left_doctors]
                         diagnosis_in_turn.append({
                             "doctor_id": i,
                             "doctor_engine_name": doctor.engine.model_name,
                             "diagnosis": doctor.get_diagnosis_by_patient_id(discussion_patient.id),
-                            "received_from": ["host"] + other_doctor_names
+                            "received_from": ["host"]  # STAR MODE: only receives host's critique
                         })
                         if self.ff_print:
                             diagnosis_dict = doctor.get_diagnosis_by_patient_id(discussion_patient.id)
@@ -1310,15 +1311,18 @@ class CollaborativeConsultation:
                 discussion_total_input += sum(i.get('input_tokens', 0) for i in host_accumulated_interactions)
                 discussion_total_output += sum(i.get('output_tokens', 0) for i in host_accumulated_interactions)
 
-        # Add reporter token usage and calculate totals with reporter
-        token_usage_summary["reporter"] = self.reporter.token_usage.copy()
+        # Add reporter tokens if present
+        discussion_total_input_for_print = discussion_total_input
+        discussion_total_output_for_print = discussion_total_output
 
-        # Add reporter tokens to discussion totals if present
         reporter_tokens = token_usage_summary.get("reporter", {})
         if reporter_tokens and reporter_tokens.get("interactions"):
             reporter_interactions = reporter_tokens.get("interactions", [])
-            discussion_total_input += sum(i.get('input_tokens', 0) for i in reporter_interactions)
-            discussion_total_output += sum(i.get('output_tokens', 0) for i in reporter_interactions)
+            discussion_total_input_for_print += sum(i.get('input_tokens', 0) for i in reporter_interactions)
+            discussion_total_output_for_print += sum(i.get('output_tokens', 0) for i in reporter_interactions)
+
+        # Add reporter token usage to summary
+        token_usage_summary["reporter"] = self.reporter.token_usage.copy()
 
         # Add discussion phase total tokens
         token_usage_summary["discussion_phase"]["total_input_tokens"] = discussion_total_input
@@ -1362,11 +1366,11 @@ class CollaborativeConsultation:
         for i, patient in enumerate(self.patients[::-1]):
             if processed_patient_ids.get(patient.id) is not None:
                 self.patients.pop((patient_num-(i+1)))
-        
+
         # random.shuffle(self.patients)
         # self.patients = self.patients
         print("To-be-diagnosed Patient Number: ", len(self.patients))
-        
+
     def save_info(self, dialog_info):
         with jsonlines.open(self.save_path, "a") as f:
             f.write(dialog_info)

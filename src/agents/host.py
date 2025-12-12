@@ -7,10 +7,10 @@ from utils.register import register_class, registry
 class Host(Agent):
     def __init__(self, args, host_info=None):
         engine = registry.get_class("Engine.GPT")(
-            openai_api_key=args.host_openai_api_key, 
+            openai_api_key=args.host_openai_api_key,
             openai_api_base=args.host_openai_api_base,
-            openai_model_name=args.host_openai_model_name, 
-            temperature=args.host_temperature, 
+            openai_model_name=args.host_openai_model_name,
+            temperature=args.host_temperature,
             max_tokens=args.host_max_tokens,
             top_p=args.host_top_p,
             frequency_penalty=args.host_frequency_penalty,
@@ -24,6 +24,13 @@ class Host(Agent):
 
         super(Host, self).__init__(engine)
 
+        # Token tracking with turn awareness
+        self.token_usage = {
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "interactions": []  # Each interaction will have "type" and "turn" fields
+        }
+
     @staticmethod
     def add_parser_args(parser):
         parser.add_argument('--host_openai_api_key', type=str, help='API key for OpenAI')
@@ -34,6 +41,29 @@ class Host(Agent):
         parser.add_argument('--host_top_p', type=float, default=1, help='top p')
         parser.add_argument('--host_frequency_penalty', type=float, default=0, help='frequency penalty')
         parser.add_argument('--host_presence_penalty', type=float, default=0, help='presence penalty')
+
+    def get_response_with_tokens(self, messages):
+        """Get response and track token usage if engine supports it."""
+        if hasattr(self.engine, 'get_response_with_tokens'):
+            content, tokens = self.engine.get_response_with_tokens(messages)
+            return content, tokens
+        else:
+            # Fallback for engines that don't support token tracking
+            content = self.engine.get_response(messages)
+            return content, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    def _track_tokens(self, tokens, interaction_type="generic", turn=None):
+        """Track tokens from an interaction with optional turn number."""
+        self.token_usage["total_input_tokens"] += tokens["prompt_tokens"]
+        self.token_usage["total_output_tokens"] += tokens["completion_tokens"]
+        interaction = {
+            "input_tokens": tokens["prompt_tokens"],
+            "output_tokens": tokens["completion_tokens"],
+            "type": interaction_type
+        }
+        if turn is not None:
+            interaction["turn"] = turn
+        self.token_usage["interactions"].append(interaction)
 
     def memorize(self, message):
         self.memories.append(message)
@@ -168,7 +198,7 @@ class Host(Agent):
 
         return complete_diagnosis
 
-    def measure_agreement(self, doctors, patient, discussion_mode="Parallel"):
+    def measure_agreement(self, doctors, patient, discussion_mode="Parallel", current_turn=None):
         # revise_mode in ["Parallel_with_Critique", "Parallel"]
         # build query message
         # int_to_char = {0: "A", 1: "B", 2: "C", 3: "D"}
@@ -178,12 +208,12 @@ class Host(Agent):
                 "##医生{}##\n\n".format(doctor.name) + \
                 "#诊断结果#\n{}\n\n".format(doctor.get_diagnosis_by_patient_id(patient.id, key="诊断结果")) + \
                 "#诊断依据#\n{}\n\n".format(doctor.get_diagnosis_by_patient_id(patient.id, key="诊断依据")) + \
-                "#治疗方案#\n{}\n\n".format(doctor.get_diagnosis_by_patient_id(patient.id, key="治疗方案")) 
+                "#治疗方案#\n{}\n\n".format(doctor.get_diagnosis_by_patient_id(patient.id, key="治疗方案"))
         # build system message
         doctor_names = ["##医生{}##".format(doctor.name) for i, doctor in enumerate(doctors)]
         if len(doctor_names) > 2:
-            doctor_names = "、".join(doctor_names[:-2]) + "、" + doctor_names[-2] + "和" + doctor_names[-1]        
-        else: doctor_names = doctor_names[0] + "和" + doctor_names[1] 
+            doctor_names = "、".join(doctor_names[:-2]) + "、" + doctor_names[-2] + "和" + doctor_names[-1]
+        else: doctor_names = doctor_names[0] + "和" + doctor_names[1]
 
         system_message = "你是一个资深的主任医生。\n" + \
             "你正在主持一场医生针对患者病情的会诊，参与的医生有{}。\n".format(doctor_names) + \
@@ -209,7 +239,9 @@ class Host(Agent):
         # run engine
         messages = [{"role": "system", "content": system_message},
             {"role": "user", "content": diagnosis_by_different_doctors}]
-        judgement = self.engine.get_response(messages)
+        judgement, tokens = self.get_response_with_tokens(messages)
+        self._track_tokens(tokens, "measure_agreement", turn=current_turn)
+
         # parse response
         if "#结束#" in judgement:
             judgement = "#结束#"
@@ -231,7 +263,8 @@ class Host(Agent):
                     "(b) xxx\n"
                 messages = [{"role": "system", "content": system_message},
                     {"role": "user", "content": diagnosis_by_different_doctors}]
-                judgement = self.engine.get_response(messages)
+                judgement, tokens = self.get_response_with_tokens(messages)
+                self._track_tokens(tokens, "measure_agreement_critique", turn=current_turn)
                 judgement = re.sub(r'.*\(a\)', '(a)', judgement, flags=re.DOTALL)
                 return judgement
         else: raise Exception("{}".format(judgement))
@@ -638,7 +671,7 @@ class Host(Agent):
 
         return decision
 
-    def analyze_discussion_state(self, doctors, patient, reporter):
+    def analyze_discussion_state(self, doctors, patient, reporter, current_turn=None):
         """
         Analyzes current discussion state and decides next action.
 
@@ -652,6 +685,7 @@ class Host(Agent):
             doctors: List of doctor agents
             patient: Patient agent instance
             reporter: Reporter agent instance
+            current_turn: Current discussion turn (for token tracking)
 
         Returns:
             dict with keys:
@@ -716,10 +750,11 @@ class Host(Agent):
 """
 
         # Get host's decision from LLM
-        response = self.engine.get_response([
+        response, tokens = self.get_response_with_tokens([
             {"role": "system", "content": "你是一个资深的会诊主持医生。"},
             {"role": "user", "content": analysis_prompt}
         ])
+        self._track_tokens(tokens, "analyze_discussion_state", turn=current_turn)
 
         # Parse response
         decision = self._parse_host_decision(response)

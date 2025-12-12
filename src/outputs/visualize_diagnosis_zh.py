@@ -39,19 +39,46 @@ def is_diagnosis_turn(content):
     return any(marker in content for marker in markers)
 
 
-def format_message_flow(role, recipient, content, icons):
-    """Format message with visual flow indicators"""
+def format_token_usage_display(doctor_name, doctor_tokens):
+    """Format token usage for display in HTML"""
+    if not doctor_tokens:
+        return ""
+
+    input_tokens = doctor_tokens.get("total_input_tokens", 0)
+    output_tokens = doctor_tokens.get("total_output_tokens", 0)
+    total_tokens = input_tokens + output_tokens
+    interaction_count = doctor_tokens.get("interaction_count", 0)
+
+    return f"""<div style="margin: 12px 0; padding: 12px; background: #f0f4ff; border-radius: 6px; border-left: 3px solid #667eea; font-size: 0.9em;">
+        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; color: #333;">
+            <div><strong style="color: #667eea;">📥 输入 Token:</strong> <span style="font-weight: bold; color: #2196f3;">{input_tokens:,}</span></div>
+            <div><strong style="color: #667eea;">📤 输出 Token:</strong> <span style="font-weight: bold; color: #ff9800;">{output_tokens:,}</span></div>
+            <div><strong style="color: #667eea;">📊 总计 Token:</strong> <span style="font-weight: bold; color: #4caf50;">{total_tokens:,}</span></div>
+            <div><strong style="color: #667eea;">🔄 交互次数:</strong> <span style="font-weight: bold; color: #9c27b0;">{interaction_count}</span></div>
+        </div>
+    </div>"""
+
+
+def format_message_flow(role, recipient, content, icons, patient_id=None, patient_model=None, doctor_name=None, doctor_model=None, reporter_model=None):
+    """Format message with visual flow indicators including backend model info"""
     cleaned_text = clean_content(content)
 
     # Detect if this is a request to reporter/exam
     if role == 'Patient' and recipient == 'Reporter':
-        return f'<img src="{icons["patient"]}" class="inline-icon"> 患者 → <img src="{icons["reporter"]}" class="inline-icon"> 检查员', cleaned_text
+        patient_info = f'患者 {patient_id} <{patient_model}>' if patient_id and patient_model else '患者'
+        reporter_info = f'检查员 <{reporter_model}>' if reporter_model else '检查员'
+        return f'<img src="{icons["patient"]}" class="inline-icon"> {patient_info} → <img src="{icons["reporter"]}" class="inline-icon"> {reporter_info}', cleaned_text
     elif role == 'Patient' and recipient == 'Doctor':
-        return f'<img src="{icons["patient"]}" class="inline-icon"> 患者 → <img src="{icons["doctor"]}" class="inline-icon"> 医生', cleaned_text
+        patient_info = f'患者 {patient_id} <{patient_model}>' if patient_id and patient_model else '患者'
+        doctor_info = f'医生 {doctor_name} <{doctor_model}>' if doctor_name and doctor_model else '医生'
+        return f'<img src="{icons["patient"]}" class="inline-icon"> {patient_info} → <img src="{icons["doctor"]}" class="inline-icon"> {doctor_info}', cleaned_text
     elif role == 'Doctor' and recipient == 'Patient':
-        return f'<img src="{icons["doctor"]}" class="inline-icon"> 医生 → <img src="{icons["patient"]}" class="inline-icon"> 患者', cleaned_text
+        doctor_info = f'医生 {doctor_name} <{doctor_model}>' if doctor_name and doctor_model else '医生'
+        patient_info = f'患者 {patient_id} <{patient_model}>' if patient_id and patient_model else '患者'
+        return f'<img src="{icons["doctor"]}" class="inline-icon"> {doctor_info} → <img src="{icons["patient"]}" class="inline-icon"> {patient_info}', cleaned_text
     elif role == 'Reporter':
-        return f'<img src="{icons["reporter"]}" class="inline-icon"> 检查员', cleaned_text
+        reporter_info = f'检查员 <{reporter_model}>' if reporter_model else '检查员'
+        return f'<img src="{icons["reporter"]}" class="inline-icon"> {reporter_info}', cleaned_text
     else:
         return f'{role}', cleaned_text
 
@@ -957,7 +984,7 @@ def generate_html(jsonl_file, output_html):
     for idx, record in enumerate(records):
         patient_id = record.get('patient_id', idx)
         html_content += f'            <div class="patient-record{" active" if idx == 0 else ""}" id="patient-{idx}">\n'
-        html_content += f'                <h2 style="color: #667eea; margin-bottom: 25px;"><img src="{icons['patient']}" class="inline-icon"> 患者编号：{patient_id}</h2>\n'
+        html_content += f'                <h2 style="color: #667eea; margin-bottom: 25px;"><img src="{icons["patient"]}" class="inline-icon"> 患者编号：{patient_id}</h2>\n'
 
         # Initial Consultations Section
         if 'initial_consultations' in record:
@@ -984,6 +1011,15 @@ def generate_html(jsonl_file, output_html):
                             </div>
 """
 
+                # Get token usage for this doctor from initial consultation phase
+                token_usage_data = record.get('token_usage', {})
+                initial_phase_tokens = token_usage_data.get('initial_consultation_phase', {}).get('doctors', {}).get(doctor_name, {})
+
+                if initial_phase_tokens:
+                    token_display = format_token_usage_display(doctor_name, initial_phase_tokens)
+                    html_content += f"                            {token_display}\n"
+
+
                 # Dialog History - skip if turn contains diagnosis
                 if 'dialog_history' in consultation:
                     for turn in consultation['dialog_history']:
@@ -999,7 +1035,14 @@ def generate_html(jsonl_file, output_html):
                         role_class = f"role-{role.lower()}"
 
                         # Format message with flow indicators
-                        flow_label, cleaned_text = format_message_flow(role, recipient, content, icons)
+                        flow_label, cleaned_text = format_message_flow(
+                            role, recipient, content, icons,
+                            patient_id=consultation.get('patient_id', idx),
+                            patient_model=consultation.get('patient_engine_name', 'Unknown'),
+                            doctor_name=doctor_name,
+                            doctor_model=doctor_engine,
+                            reporter_model=record.get('reporter_engine_name', 'Unknown')
+                        )
 
                         # Custom color for doctor turns
                         border_color = doctor_color if role == 'Doctor' else ''
@@ -1042,6 +1085,73 @@ def generate_html(jsonl_file, output_html):
                 html_content += "                        </div>\n"
 
             html_content += """                    </div>
+                </div>
+"""
+
+            # Add accumulated token summary for initial consultations
+            token_usage_data = record.get('token_usage', {})
+            initial_phase_data = token_usage_data.get('initial_consultation_phase', {}).get('doctors', {})
+
+            if initial_phase_data:
+                total_input = sum(doc.get('total_input_tokens', 0) for doc in initial_phase_data.values())
+                total_output = sum(doc.get('total_output_tokens', 0) for doc in initial_phase_data.values())
+                total_tokens = total_input + total_output
+                total_interactions = sum(doc.get('interaction_count', 0) for doc in initial_phase_data.values())
+
+                html_content += f"""                <div class="section">
+                    <div class="section-header" onclick="toggleSection(this)">
+                        <span>📊 Token 使用统计 - 初步会诊</span>
+                        <span class="toggle-icon">▼</span>
+                    </div>
+                    <div class="section-content">
+                        <div style="padding: 20px; background: white;">
+                            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 20px;">
+                                <div style="background: #e3f2fd; padding: 15px; border-radius: 8px; border-left: 4px solid #2196f3;">
+                                    <div style="font-weight: bold; color: #1976d2; font-size: 0.9em;">累计输入</div>
+                                    <div style="font-size: 1.8em; font-weight: bold; color: #2196f3;">{total_input:,}</div>
+                                    <div style="font-size: 0.8em; color: #666;">tokens</div>
+                                </div>
+                                <div style="background: #fff3e0; padding: 15px; border-radius: 8px; border-left: 4px solid #ff9800;">
+                                    <div style="font-weight: bold; color: #e65100; font-size: 0.9em;">累计输出</div>
+                                    <div style="font-size: 1.8em; font-weight: bold; color: #ff9800;">{total_output:,}</div>
+                                    <div style="font-size: 0.8em; color: #666;">tokens</div>
+                                </div>
+                                <div style="background: #f3e5f5; padding: 15px; border-radius: 8px; border-left: 4px solid #9c27b0;">
+                                    <div style="font-weight: bold; color: #6a1b9a; font-size: 0.9em;">总计</div>
+                                    <div style="font-size: 1.8em; font-weight: bold; color: #9c27b0;">{total_tokens:,}</div>
+                                    <div style="font-size: 0.8em; color: #666;">tokens</div>
+                                </div>
+                                <div style="background: #e8f5e9; padding: 15px; border-radius: 8px; border-left: 4px solid #4caf50;">
+                                    <div style="font-weight: bold; color: #2e7d32; font-size: 0.9em;">总交互</div>
+                                    <div style="font-size: 1.8em; font-weight: bold; color: #4caf50;">{total_interactions}</div>
+                                    <div style="font-size: 0.8em; color: #666;">次</div>
+                                </div>
+                            </div>
+
+                            <div style="margin-top: 20px;">
+                                <h4 style="color: #667eea; margin-bottom: 15px;">📋 医生详细统计：</h4>
+                                <div style="display: flex; flex-direction: column; gap: 12px;">
+"""
+
+                for doc_name, doc_tokens in initial_phase_data.items():
+                    doc_input = doc_tokens.get('total_input_tokens', 0)
+                    doc_output = doc_tokens.get('total_output_tokens', 0)
+                    doc_total = doc_input + doc_output
+
+                    html_content += f"""                                    <div style="padding: 12px; background: #f8f9fa; border-radius: 6px; border-left: 3px solid #667eea;">
+                                        <div style="font-weight: bold; color: #667eea; margin-bottom: 8px;">{doc_name}</div>
+                                        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; font-size: 0.9em;">
+                                            <div>📥 输入: <span style="font-weight: bold; color: #2196f3;">{doc_input:,}</span></div>
+                                            <div>📤 输出: <span style="font-weight: bold; color: #ff9800;">{doc_output:,}</span></div>
+                                            <div>📊 总计: <span style="font-weight: bold; color: #4caf50;">{doc_total:,}</span></div>
+                                        </div>
+                                    </div>
+"""
+
+                html_content += """                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 """
 
@@ -1231,6 +1341,49 @@ def generate_html(jsonl_file, output_html):
                 html_content += """                            </div>
 """
 
+                # ===== HOST TOKEN USAGE (if discussion occurred) =====
+                # Show host's token usage for this turn
+                host_tokens = token_usage_data.get('discussion_phase', {}).get('host', {})
+                if host_tokens and host_tokens.get('interactions'):
+                    interactions = host_tokens.get('interactions', [])
+                    turn_interactions = [i for i in interactions if i.get('turn') == turn_num]
+                    accumulated_interactions = [i for i in interactions if i.get('turn') and i.get('turn') <= turn_num]
+
+                    if turn_interactions or accumulated_interactions:
+                        # Current turn tokens
+                        turn_input = sum(i.get('input_tokens', 0) for i in turn_interactions)
+                        turn_output = sum(i.get('output_tokens', 0) for i in turn_interactions)
+
+                        # Accumulated tokens up to current turn
+                        acc_input = sum(i.get('input_tokens', 0) for i in accumulated_interactions)
+                        acc_output = sum(i.get('output_tokens', 0) for i in accumulated_interactions)
+
+                        html_content += f"""                            <div style="margin: 20px 0; padding: 15px; background: #fff8e1; border-radius: 8px; border-left: 4px solid #ffa726;">
+                                <div style="font-weight: bold; color: #f57c00; margin-bottom: 12px; display: flex; align-items: center; gap: 10px;">
+                                    <span><img src="{icons['host']}" class="inline-icon"></span>
+                                    <span>📊 主任医师 - 第 {turn_num} 轮 Token 使用</span>
+                                </div>
+                                <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; font-size: 0.9em;">
+                                    <div style="background: white; padding: 10px; border-radius: 4px;">
+                                        <div style="font-size: 0.8em; color: #666; margin-bottom: 3px;">本轮输入</div>
+                                        <div style="font-size: 1.1em; font-weight: bold; color: #2196f3;">{turn_input:,}</div>
+                                    </div>
+                                    <div style="background: white; padding: 10px; border-radius: 4px;">
+                                        <div style="font-size: 0.8em; color: #666; margin-bottom: 3px;">本轮输出</div>
+                                        <div style="font-size: 1.1em; font-weight: bold; color: #ff9800;">{turn_output:,}</div>
+                                    </div>
+                                    <div style="background: #e3f2fd; padding: 10px; border-radius: 4px; border-left: 2px solid #2196f3;">
+                                        <div style="font-size: 0.8em; color: #1976d2; margin-bottom: 3px;">累计输入</div>
+                                        <div style="font-size: 1.1em; font-weight: bold; color: #1565c0;">{acc_input:,}</div>
+                                    </div>
+                                    <div style="background: #fff3e0; padding: 10px; border-radius: 4px; border-left: 2px solid #ff9800;">
+                                        <div style="font-size: 0.8em; color: #e65100; margin-bottom: 3px;">累计输出</div>
+                                        <div style="font-size: 1.1em; font-weight: bold; color: #e65100;">{acc_output:,}</div>
+                                    </div>
+                                </div>
+                            </div>
+"""
+
                 # ===== PHASE 2: Revision (if discussion continues) =====
                 # Only show Phase 2 if host decision is begin_discussion, continue_discussion, or update_with_patient_info
                 if 'host_decision' in round_data:
@@ -1268,7 +1421,12 @@ def generate_html(jsonl_file, output_html):
                                     <div style="font-weight: bold; color: {doctor_color}; margin-bottom: 15px; font-size: 1.05em; padding-bottom: 10px; border-bottom: 2px solid {doctor_color};">
                                         <img src="{icons['doctor']}" class="inline-icon"> {doctor_name} 的修订回合
                                     </div>
+"""
 
+                                # Get token usage for this doctor in discussion phase
+                                discussion_phase_data = token_usage_data.get('discussion_phase', {}).get('doctors', {}).get(doctor_name, {})
+
+                                html_content += f"""
                                     <div style="margin: 15px 0; padding: 12px; background: #f8f9fa; border-radius: 6px;">
                                         <div style="font-weight: bold; color: #667eea; margin-bottom: 10px; font-size: 0.95em;">接收输入来自：</div>
 """
@@ -1284,13 +1442,16 @@ def generate_html(jsonl_file, output_html):
                                         </div>
 """
 
-                                # Show input from other doctors
+                                # Show input from other doctors (only if they're in received_from)
+                                received_from = doctor_diag.get('received_from', [])
                                 for other_idx in range(num_doctors):
                                     if other_idx != doctor_id:
                                         other_color = doctor_colors[other_idx % len(doctor_colors)]
                                         other_name = record['initial_consultations'][other_idx].get('doctor_name', f'Doctor {other_idx}') if other_idx < len(record.get('initial_consultations', [])) else f'Doctor {other_idx}'
 
-                                        html_content += f"""                                        <div style="margin: 8px 0; padding: 8px; background: white; border-left: 3px solid {other_color}; border-radius: 4px;">
+                                        # Only show if this other doctor is in received_from list (for actual message flows)
+                                        if other_name in received_from:
+                                            html_content += f"""                                        <div style="margin: 8px 0; padding: 8px; background: white; border-left: 3px solid {other_color}; border-radius: 4px;">
                                             <div style="display: flex; align-items: center; gap: 8px; font-size: 0.9em;">
                                                 <span style="color: {other_color}; font-weight: bold;"><img src="{icons['doctor']}" class="inline-icon"> {other_name}</span>
                                                 <span style="font-size: 1.2em; color: #667eea;">→</span>
@@ -1307,6 +1468,50 @@ def generate_html(jsonl_file, output_html):
                                 html_content += f"""                                    <div style="margin: 15px 0; padding: 15px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid {doctor_color};">
                                         <div style="font-weight: bold; color: {doctor_color}; margin-bottom: 12px; font-size: 1em;">
                                             <img src="{icons['doctor']}" class="inline-icon"> 修订后的诊断（{doctor_engine}）
+                                        </div>
+"""
+
+                                # Get tokens for this doctor in discussion phase
+                                discussion_phase_data = token_usage_data.get('discussion_phase', {}).get('doctors', {}).get(doctor_name, {})
+                                if discussion_phase_data and discussion_phase_data.get('interactions'):
+                                    # Filter interactions for this specific turn and accumulated
+                                    interactions = discussion_phase_data.get('interactions', [])
+                                    turn_interactions = [i for i in interactions if i.get('turn') == turn_num]
+                                    accumulated_interactions = [i for i in interactions if i.get('turn') and i.get('turn') <= turn_num]
+
+                                    if turn_interactions or accumulated_interactions:
+                                        # Current turn tokens
+                                        turn_input = sum(i.get('input_tokens', 0) for i in turn_interactions)
+                                        turn_output = sum(i.get('output_tokens', 0) for i in turn_interactions)
+
+                                        # Accumulated tokens up to current turn
+                                        acc_input = sum(i.get('input_tokens', 0) for i in accumulated_interactions)
+                                        acc_output = sum(i.get('output_tokens', 0) for i in accumulated_interactions)
+
+                                        html_content += f"""                                        <div style="margin: 12px 0; padding: 12px; background: #f0f4ff; border-radius: 6px; border-left: 3px solid {doctor_color}; font-size: 0.85em;">
+                                            <div style="margin-bottom: 10px; font-weight: bold; color: {doctor_color}; border-bottom: 1px solid #cce0ff; padding-bottom: 8px;">
+                                                📊 第 {turn_num} 轮 Token 使用
+                                            </div>
+                                            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 10px;">
+                                                <div style="background: white; padding: 8px; border-radius: 4px;">
+                                                    <div style="font-size: 0.8em; color: #666; margin-bottom: 3px;">本轮输入</div>
+                                                    <div style="font-size: 1.1em; font-weight: bold; color: #2196f3;">{turn_input:,}</div>
+                                                </div>
+                                                <div style="background: white; padding: 8px; border-radius: 4px;">
+                                                    <div style="font-size: 0.8em; color: #666; margin-bottom: 3px;">本轮输出</div>
+                                                    <div style="font-size: 1.1em; font-weight: bold; color: #ff9800;">{turn_output:,}</div>
+                                                </div>
+                                            </div>
+                                            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;">
+                                                <div style="background: #e3f2fd; padding: 8px; border-radius: 4px; border-left: 2px solid #2196f3;">
+                                                    <div style="font-size: 0.8em; color: #1976d2; margin-bottom: 3px;">累计输入</div>
+                                                    <div style="font-size: 1.1em; font-weight: bold; color: #1565c0;">{acc_input:,}</div>
+                                                </div>
+                                                <div style="background: #fff3e0; padding: 8px; border-radius: 4px; border-left: 2px solid #ff9800;">
+                                                    <div style="font-size: 0.8em; color: #e65100; margin-bottom: 3px;">累计输出</div>
+                                                    <div style="font-size: 1.1em; font-weight: bold; color: #e65100;">{acc_output:,}</div>
+                                                </div>
+                                            </div>
                                         </div>
 """
 
@@ -1392,6 +1597,37 @@ def generate_html(jsonl_file, output_html):
 """
 
             html_content += "                </div>\n"
+
+        # Discussion Phase Token Summary (Chinese version)
+        token_usage_data = record.get('token_usage', {})
+        discussion_phase_data = token_usage_data.get('discussion_phase', {})
+        if discussion_phase_data:
+            total_input = discussion_phase_data.get('total_input_tokens', 0)
+            total_output = discussion_phase_data.get('total_output_tokens', 0)
+            total_tokens = discussion_phase_data.get('total_tokens', 0)
+
+            if total_tokens > 0:
+                html_content += f"""            <div style="margin-top: 30px; padding: 25px; background: linear-gradient(135deg, #f3e5f5 0%, #ede7f6 100%); border-radius: 10px; border-left: 5px solid #9c27b0;">
+                <h3 style="color: #9c27b0; margin-bottom: 20px; font-size: 1.4em;">
+                    <span style="font-size: 1.8em;">📊</span> 讨论阶段 - 总 Token 使用摘要
+                </h3>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                    <div style="padding: 15px; background: white; border-radius: 8px; border-left: 4px solid #2196f3;">
+                        <div style="color: #2196f3; font-weight: bold; font-size: 0.9em; margin-bottom: 8px;">输入 Token</div>
+                        <div style="font-size: 1.6em; font-weight: bold; color: #1976d2;">{total_input:,}</div>
+                    </div>
+                    <div style="padding: 15px; background: white; border-radius: 8px; border-left: 4px solid #4caf50;">
+                        <div style="color: #4caf50; font-weight: bold; font-size: 0.9em; margin-bottom: 8px;">输出 Token</div>
+                        <div style="font-size: 1.6em; font-weight: bold; color: #388e3c;">{total_output:,}</div>
+                    </div>
+                    <div style="padding: 15px; background: white; border-radius: 8px; border-left: 4px solid #9c27b0;">
+                        <div style="color: #9c27b0; font-weight: bold; font-size: 0.9em; margin-bottom: 8px;">总 Token</div>
+                        <div style="font-size: 1.6em; font-weight: bold; color: #7b1fa2;">{total_tokens:,}</div>
+                    </div>
+                </div>
+            </div>
+"""
+
 
         html_content += "            </div>\n"
 

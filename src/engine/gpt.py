@@ -79,3 +79,69 @@ class GPTEngine(Engine):
             raise Exception(f"Failed to get response after 5 retries")
         return response.choices[0].message.content
 
+    def get_response_with_tokens(self, messages):
+        """Get response and return both content and token usage.
+
+        Returns:
+            tuple: (content, token_usage_dict) where token_usage_dict contains:
+                - prompt_tokens: Number of tokens in the input
+                - completion_tokens: Number of tokens in the output
+                - total_tokens: Total tokens used
+        """
+        model_name = self.model_name
+        i = 0
+        response = None
+        while i < 5:
+            try:
+                response = self.client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                    top_p=self.top_p,
+                    frequency_penalty=self.frequency_penalty,
+                    presence_penalty=self.presence_penalty
+                )
+                break
+            except openai.BadRequestError as e:
+                # Try with max_completion_tokens if max_tokens fails
+                if "max_tokens" in str(e):
+                    try:
+                        response = self.client.chat.completions.create(
+                            model=model_name,
+                            messages=messages,
+                            temperature=self.temperature,
+                            max_completion_tokens=self.max_tokens,
+                            top_p=self.top_p,
+                            frequency_penalty=self.frequency_penalty,
+                            presence_penalty=self.presence_penalty
+                        )
+                        break
+                    except Exception:
+                        pass
+                if model_name == "gpt-3.5-turbo":
+                    model_name = "gpt-3.5-turbo-16k"
+                i += 1
+            except openai.RateLimitError as e:
+                print(f"[Retry {i+1}/5] RateLimitError: {e}. Sleeping 10s...")
+                time.sleep(10)
+                i += 1
+            except Exception as e:
+                error_type = type(e).__name__
+                print(f"[Retry {i+1}/5] {error_type}: {e}. Sleeping 5s...")
+                i += 1
+                time.sleep(5)
+                continue
+        if response is None:
+            raise Exception(f"Failed to get response after 5 retries")
+
+        # Extract token usage
+        # Some APIs may not return usage info, so we default to 0 if not available
+        token_usage = {
+            "prompt_tokens": getattr(response.usage, 'prompt_tokens', 0) if response.usage else 0,
+            "completion_tokens": getattr(response.usage, 'completion_tokens', 0) if response.usage else 0,
+            "total_tokens": getattr(response.usage, 'total_tokens', 0) if response.usage else 0
+        }
+
+        return response.choices[0].message.content, token_usage
+

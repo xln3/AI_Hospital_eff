@@ -6,6 +6,11 @@
     },
     {
         "doctor_name": "Agent.Doctor.AiHubMix",
+        "doctor_aihubmix_model_name": "grok-4-1-fast-reasoning",
+        "doctor_nickname": "Dr_Bob"
+    },
+    {
+        "doctor_name": "Agent.Doctor.AiHubMix",
         "doctor_aihubmix_model_name": "qwen-turbo-latest",
         "doctor_nickname": "Dr_Carol"
     },

@@ -7,10 +7,10 @@ from utils.register import register_class, registry
 class Reporter(Agent):
     def __init__(self, args, reporter_info=None):
         engine = registry.get_class("Engine.GPT")(
-            openai_api_key=args.reporter_openai_api_key, 
+            openai_api_key=args.reporter_openai_api_key,
             openai_api_base=args.reporter_openai_api_base,
-            openai_model_name=args.reporter_openai_model_name, 
-            temperature=args.reporter_temperature, 
+            openai_model_name=args.reporter_openai_model_name,
+            temperature=args.reporter_temperature,
             max_tokens=args.reporter_max_tokens,
             top_p=args.reporter_top_p,
             frequency_penalty=args.reporter_frequency_penalty,
@@ -22,8 +22,15 @@ class Reporter(Agent):
             self.system_message = \
                 "你是医院的数据库管理员，负责收集、汇总和整理病人的病史和检查数据。\n"
         else: self.system_message = reporter_info
-        
+
         super(Reporter, self).__init__(engine)
+
+        # Token tracking
+        self.token_usage = {
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "interactions": []
+        }
 
     @staticmethod
     def add_parser_args(parser):
@@ -36,6 +43,16 @@ class Reporter(Agent):
         parser.add_argument('--reporter_top_p', type=float, default=1, help='top p')
         parser.add_argument('--reporter_frequency_penalty', type=float, default=0, help='frequency penalty')
         parser.add_argument('--reporter_presence_penalty', type=float, default=0, help='presence penalty')
+
+    def get_response_with_tokens(self, messages):
+        """Get response and track token usage if engine supports it."""
+        if hasattr(self.engine, 'get_response_with_tokens'):
+            content, tokens = self.engine.get_response_with_tokens(messages)
+            return content, tokens
+        else:
+            # Fallback for engines that don't support token tracking
+            content = self.engine.get_response(messages)
+            return content, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     def speak(self, medical_records, content, save_to_memory=False):
         system_message = self.system_message + '\n\n' + \
@@ -60,7 +77,16 @@ class Reporter(Agent):
             {"role": "user", "content": content}
         ]
 
-        response = self.engine.get_response(messages)
+        response, tokens = self.get_response_with_tokens(messages)
+
+        # Track tokens
+        self.token_usage["total_input_tokens"] += tokens["prompt_tokens"]
+        self.token_usage["total_output_tokens"] += tokens["completion_tokens"]
+        self.token_usage["interactions"].append({
+            "input_tokens": tokens["prompt_tokens"],
+            "output_tokens": tokens["completion_tokens"]
+        })
+
         return response
     
     @staticmethod

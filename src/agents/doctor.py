@@ -66,11 +66,30 @@ class Doctor(Agent):
 
         def default_diagnosis_factory():
             return {}
-        self.diagnosis = defaultdict(default_diagnosis_factory) 
+        self.diagnosis = defaultdict(default_diagnosis_factory)
+
+        # Token tracking for each patient consultation
+        def default_tokens_factory():
+            return {
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "interactions": []  # List of individual turn token counts
+            }
+        self.token_usage = defaultdict(default_tokens_factory)
 
     def get_response(self, messages):
         response = self.engine.get_response(messages)
         return response
+
+    def get_response_with_tokens(self, messages):
+        """Get response and track token usage if engine supports it."""
+        if hasattr(self.engine, 'get_response_with_tokens'):
+            content, tokens = self.engine.get_response_with_tokens(messages)
+            return content, tokens
+        else:
+            # Fallback for engines that don't support token tracking
+            content = self.engine.get_response(messages)
+            return content, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     def get_diagnosis_by_patient_id(self, patient_id, key="ALL"):
         if key == "ALL":
@@ -148,17 +167,38 @@ class Doctor(Agent):
         messages = [{"role": memory[0], "content": memory[1]} for memory in memories]
         messages.append({"role": "user", "content": content})
 
-        responese = self.get_response(messages)
+        # Get response with token tracking
+        response, tokens = self.get_response_with_tokens(messages)
 
         self.memorize(("user", content), patient_id)
-        self.memorize(("assistant", responese), patient_id)
+        self.memorize(("assistant", response), patient_id)
 
-        return responese
+        # Debug: Print before accumulation
+        # print(f"\n[DEBUG Doctor.speak] patient_id={patient_id}, tokens before accumulation: {self.token_usage[patient_id]}")
+        # print(f"[DEBUG Doctor.speak] Received tokens from API: {tokens}")
 
-    def revise_diagnosis_by_symptom_and_examination(self, patient, symptom_and_examination):
+        # Track tokens for this interaction
+        self.token_usage[patient_id]["total_input_tokens"] += tokens["prompt_tokens"]
+        self.token_usage[patient_id]["total_output_tokens"] += tokens["completion_tokens"]
+        self.token_usage[patient_id]["interactions"].append({
+            "input_tokens": tokens["prompt_tokens"],
+            "output_tokens": tokens["completion_tokens"]
+        })
+
+        # Debug: Print after accumulation
+        print(f"[DEBUG Doctor.speak] tokens after accumulation: {self.token_usage[patient_id]}\n")
+
+        # Debug: Print token info if both are 0 (indicates potential API issue)
+        if tokens["prompt_tokens"] == 0 and tokens["completion_tokens"] == 0:
+            import sys
+            print(f"[WARNING] Doctor {self.name}: Zero tokens returned from API. Response length: {len(response)} chars", file=sys.stderr)
+
+        return response
+
+    def revise_diagnosis_by_symptom_and_examination(self, patient, symptom_and_examination, current_turn=None):
         # load the symptom and examination from the host
         self.load_diagnosis(
-            diagnosis=symptom_and_examination, 
+            diagnosis=symptom_and_examination,
             patient_id=patient.id
         )
         # revise the diagnosis
@@ -176,31 +216,42 @@ class Doctor(Agent):
             "#治疗方案#\n(1) xxx\n(2) xxx\n"
         # build the content
         content = "#诊断结果#\n{}\n\n#诊断依据#\n{}\n\n#治疗方案#\n{}".format(
-            self.get_diagnosis_by_patient_id(patient.id, key="诊断结果"), 
-            self.get_diagnosis_by_patient_id(patient.id, key="诊断依据"), 
+            self.get_diagnosis_by_patient_id(patient.id, key="诊断结果"),
+            self.get_diagnosis_by_patient_id(patient.id, key="诊断依据"),
             self.get_diagnosis_by_patient_id(patient.id, key="治疗方案")
         )
         # get the revised diagnosis from the doctor
-        diagnosis = self.get_response([
-            {"role": "system", "content": system_message}, 
+        diagnosis, tokens = self.get_response_with_tokens([
+            {"role": "system", "content": system_message},
             {"role": "user", "content": content}
         ])
+
+        # Track tokens for this revision
+        self.token_usage[patient.id]["total_input_tokens"] += tokens["prompt_tokens"]
+        self.token_usage[patient.id]["total_output_tokens"] += tokens["completion_tokens"]
+        self.token_usage[patient.id]["interactions"].append({
+            "input_tokens": tokens["prompt_tokens"],
+            "output_tokens": tokens["completion_tokens"],
+            "type": "revision_by_symptom_and_examination",
+            "turn": current_turn
+        })
+
         # update the diagnosis of doctor for patient with "patient_id"
         self.load_diagnosis(
             diagnosis=diagnosis,
             patient_id=patient.id
         )
 
-    def revise_diagnosis_by_others(self, patient, doctors, host_critique=None, discussion_mode="Parallel"):
+    def revise_diagnosis_by_others(self, patient, doctors, host_critique=None, discussion_mode="Parallel", current_turn=None):
         # revise_mode in ["Parallel", "Parallel_with_Critique"]
         if discussion_mode == "Parallel":
-            self.revise_diagnosis_by_others_in_parallel(patient, doctors)
+            self.revise_diagnosis_by_others_in_parallel(patient, doctors, host_critique=host_critique, current_turn=current_turn)
         elif discussion_mode == "Parallel_with_Critique":
-            self.revise_diagnosis_by_others_in_parallel_with_critique(patient, doctors, host_critique)
+            self.revise_diagnosis_by_others_in_parallel_with_critique(patient, doctors, host_critique, current_turn=current_turn)
         else:
             raise Exception("Wrong discussion_mode: {}".format(discussion_mode))
 
-    def revise_diagnosis_by_others_in_parallel(self, patient, doctors):
+    def revise_diagnosis_by_others_in_parallel(self, patient, doctors, host_critique=None, current_turn=None):
         # load the symptom and examination from the host
         system_message = "你是一个专业的医生。\n" + \
             "你正在为患者做诊断，患者的症状和辅助检查如下：\n" + \
@@ -209,50 +260,29 @@ class Doctor(Agent):
             "针对患者的病情，你给出了初步的诊断意见：\n" + \
             "#诊断结果#\n{}\n\n".format(self.get_diagnosis_by_patient_id(patient.id, key="诊断结果")) + \
             "#诊断依据#\n{}\n\n".format(self.get_diagnosis_by_patient_id(patient.id, key="诊断依据")) + \
-            "#治疗方案#\n{}\n\n".format(self.get_diagnosis_by_patient_id(patient.id, key="治疗方案")) + \
-            "(1) 下面你将收到来自其他医生的诊断意见，其中也包含诊断结果、诊断依据和治疗方案。你需要批判性地梳理并分析其他医生的诊断意见。\n" + \
-            "(2) 如果你发现其他医生给出的诊断意见有比你的更合理的部分，请吸纳进你的诊断意见中进行改进。\n" + \
-            "(3) 如果你认为你的诊断意见相对于其他医生的更科学合理，请坚持自己的意见保持不变。\n" + \
-            "(4) 请你按照下面的格式来输出。\n" + \
-            "#诊断结果#\n(1) xxx\n(2) xxx\n\n" + \
-            "#诊断依据#\n(1) xxx\n(2) xxx\n\n" + \
-            "#治疗方案#\n(1) xxx\n(2) xxx\n"
-        # build the content
-        content = ""
-        for i, doctor in enumerate(doctors):
-            content += "##医生{}##\n\n#诊断结果#\n{}\n\n#诊断依据#\n{}\n\n#治疗方案#\n{}\n\n".format(
-                doctor.name,
-                doctor.get_diagnosis_by_patient_id(patient.id, key="诊断结果"), 
-                doctor.get_diagnosis_by_patient_id(patient.id, key="诊断依据"), 
-                doctor.get_diagnosis_by_patient_id(patient.id, key="治疗方案")
-            )
-        responese = self.get_response([
-            {"role": "system", "content": system_message}, 
-            {"role": "user", "content": content}
-        ])
-        self.load_diagnosis(
-            diagnosis=responese,
-            patient_id=patient.id
-        )
+            "#治疗方案#\n{}\n\n".format(self.get_diagnosis_by_patient_id(patient.id, key="治疗方案"))
 
-    def revise_diagnosis_by_others_in_parallel_with_critique(self, patient, doctors, host_critique=None):
-        # load the symptom and examination from the host
-        system_message = "你是一个专业的医生{}。\n".format(self.name) + \
-            "你正在为患者做诊断，患者的症状和辅助检查如下：\n" + \
-            "#症状#\n{}\n\n".format(self.get_diagnosis_by_patient_id(patient.id, key="症状")) + \
-            "#辅助检查#\n{}\n\n".format(self.get_diagnosis_by_patient_id(patient.id, key="辅助检查")) + \
-            "针对患者的病情，你给出了初步的诊断意见：\n" + \
-            "#诊断结果#\n{}\n\n".format(self.get_diagnosis_by_patient_id(patient.id, key="诊断结果")) + \
-            "#诊断依据#\n{}\n\n".format(self.get_diagnosis_by_patient_id(patient.id, key="诊断依据")) + \
-            "#治疗方案#\n{}\n\n".format(self.get_diagnosis_by_patient_id(patient.id, key="治疗方案")) + \
-            "(1) 下面你将收到来自其他医生的诊断意见，其中也包含诊断结果、诊断依据和治疗方案。你需要批判性地梳理并分析其他医生的诊断意见。\n" + \
-            "(2) 在这个过程中，请你注意主治医生给出的争议点。\n" + \
-            "(3) 如果你发现其他医生给出的诊断意见有比你的更合理的部分，请吸纳进你的诊断意见中进行改进。\n" + \
-            "(4) 如果你认为你的诊断意见相对于其他医生的更科学合理，请坚持自己的意见保持不变。\n" + \
-            "(5) 请你按照下面的格式来输出。\n" + \
-            "#诊断结果#\n(1) xxx\n(2) xxx\n\n" + \
-            "#诊断依据#\n(1) xxx\n(2) xxx\n\n" + \
-            "#治疗方案#\n(1) xxx\n(2) xxx\n"
+        # Build prompt based on whether other doctors are present
+        if doctors:
+            # Regular mode: doctors review each other's opinions
+            system_message += \
+                "(1) 下面你将收到来自其他医生的诊断意见，其中也包含诊断结果、诊断依据和治疗方案。你需要批判性地梳理并分析其他医生的诊断意见。\n" + \
+                "(2) 如果你发现其他医生给出的诊断意见有比你的更合理的部分，请吸纳进你的诊断意见中进行改进。\n" + \
+                "(3) 如果你认为你的诊断意见相对于其他医生的更科学合理，请坚持自己的意见保持不变。\n" + \
+                "(4) 请你按照下面的格式来输出。\n" + \
+                "#诊断结果#\n(1) xxx\n(2) xxx\n\n" + \
+                "#诊断依据#\n(1) xxx\n(2) xxx\n\n" + \
+                "#治疗方案#\n(1) xxx\n(2) xxx\n"
+        else:
+            # STAR mode: no other doctors, only review host's critique
+            system_message += \
+                "(1) 下面你将收到来自会诊主持医生的分析意见和建议。\n" + \
+                "(2) 基于主持医生的分析，请对你的诊断意见进行审视和可能的改进。\n" + \
+                "(3) 请你按照下面的格式来输出。\n" + \
+                "#诊断结果#\n(1) xxx\n(2) xxx\n\n" + \
+                "#诊断依据#\n(1) xxx\n(2) xxx\n\n" + \
+                "#治疗方案#\n(1) xxx\n(2) xxx\n"
+
         # build the content
         content = ""
         for i, doctor in enumerate(doctors):
@@ -262,17 +292,98 @@ class Doctor(Agent):
                 doctor.get_diagnosis_by_patient_id(patient.id, key="诊断依据"),
                 doctor.get_diagnosis_by_patient_id(patient.id, key="治疗方案")
             )
-        content += "##主任医生##\n{}".format(host_critique)
 
-        # print("doctor: {}".format(self.name))
-        # print(content)
-        # print("-"*100)
-        responese = self.get_response([
+        # Add host's critique if available (even in Parallel mode)
+        if host_critique and host_critique not in ['#继续#', '#结束#']:
+            content += "\n##会诊主持医生的分析##\n{}".format(host_critique)
+
+        response, tokens = self.get_response_with_tokens([
             {"role": "system", "content": system_message},
             {"role": "user", "content": content}
         ])
+
+        # Track tokens for this revision
+        self.token_usage[patient.id]["total_input_tokens"] += tokens["prompt_tokens"]
+        self.token_usage[patient.id]["total_output_tokens"] += tokens["completion_tokens"]
+        self.token_usage[patient.id]["interactions"].append({
+            "input_tokens": tokens["prompt_tokens"],
+            "output_tokens": tokens["completion_tokens"],
+            "type": "revision_by_others_in_parallel",
+            "turn": current_turn
+        })
+
         self.load_diagnosis(
-            diagnosis=responese,
+            diagnosis=response,
+            patient_id=patient.id
+        )
+
+    def revise_diagnosis_by_others_in_parallel_with_critique(self, patient, doctors, host_critique=None, current_turn=None):
+        # load the symptom and examination from the host
+        system_message = "你是一个专业的医生{}。\n".format(self.name) + \
+            "你正在为患者做诊断，患者的症状和辅助检查如下：\n" + \
+            "#症状#\n{}\n\n".format(self.get_diagnosis_by_patient_id(patient.id, key="症状")) + \
+            "#辅助检查#\n{}\n\n".format(self.get_diagnosis_by_patient_id(patient.id, key="辅助检查")) + \
+            "针对患者的病情，你给出了初步的诊断意见：\n" + \
+            "#诊断结果#\n{}\n\n".format(self.get_diagnosis_by_patient_id(patient.id, key="诊断结果")) + \
+            "#诊断依据#\n{}\n\n".format(self.get_diagnosis_by_patient_id(patient.id, key="诊断依据")) + \
+            "#治疗方案#\n{}\n\n".format(self.get_diagnosis_by_patient_id(patient.id, key="治疗方案"))
+
+        # Build prompt based on whether other doctors are present
+        if doctors:
+            # Regular mode: doctors review each other's opinions with critique
+            system_message += \
+                "(1) 下面你将收到来自其他医生的诊断意见，其中也包含诊断结果、诊断依据和治疗方案。你需要批判性地梳理并分析其他医生的诊断意见。\n" + \
+                "(2) 在这个过程中，请你注意主治医生给出的争议点。\n" + \
+                "(3) 如果你发现其他医生给出的诊断意见有比你的更合理的部分，请吸纳进你的诊断意见中进行改进。\n" + \
+                "(4) 如果你认为你的诊断意见相对于其他医生的更科学合理，请坚持自己的意见保持不变。\n" + \
+                "(5) 请你按照下面的格式来输出。\n" + \
+                "#诊断结果#\n(1) xxx\n(2) xxx\n\n" + \
+                "#诊断依据#\n(1) xxx\n(2) xxx\n\n" + \
+                "#治疗方案#\n(1) xxx\n(2) xxx\n"
+        else:
+            # STAR mode: no other doctors, only review host's critique with specific focus points
+            system_message += \
+                "(1) 下面你将收到来自会诊主持医生的分析意见和建议。主持医生指出了一些需要关注的争议点。\n" + \
+                "(2) 请你仔细审视主持医生指出的问题，考虑这些观点对你的诊断的影响。\n" + \
+                "(3) 基于这些分析，请对你的诊断意见进行审视和可能的改进。\n" + \
+                "(4) 请你按照下面的格式来输出。\n" + \
+                "#诊断结果#\n(1) xxx\n(2) xxx\n\n" + \
+                "#诊断依据#\n(1) xxx\n(2) xxx\n\n" + \
+                "#治疗方案#\n(1) xxx\n(2) xxx\n"
+
+        # build the content
+        content = ""
+        for i, doctor in enumerate(doctors):
+            content += "##医生{}##\n\n#诊断结果#\n{}\n\n#诊断依据#\n{}\n\n#治疗方案#\n{}\n\n".format(
+                doctor.name,
+                doctor.get_diagnosis_by_patient_id(patient.id, key="诊断结果"),
+                doctor.get_diagnosis_by_patient_id(patient.id, key="诊断依据"),
+                doctor.get_diagnosis_by_patient_id(patient.id, key="治疗方案")
+            )
+
+        # Add host's critique with appropriate label
+        if doctors:
+            content += "##主任医生##\n{}".format(host_critique)
+        else:
+            content += "##会诊主持医生的分析##\n{}".format(host_critique)
+
+        response, tokens = self.get_response_with_tokens([
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": content}
+        ])
+
+        # Track tokens for this revision
+        self.token_usage[patient.id]["total_input_tokens"] += tokens["prompt_tokens"]
+        self.token_usage[patient.id]["total_output_tokens"] += tokens["completion_tokens"]
+        self.token_usage[patient.id]["interactions"].append({
+            "input_tokens": tokens["prompt_tokens"],
+            "output_tokens": tokens["completion_tokens"],
+            "type": "revision_by_others_in_parallel_with_critique",
+            "turn": current_turn
+        })
+
+        self.load_diagnosis(
+            diagnosis=response,
             patient_id=patient.id
         )
 
@@ -293,7 +404,7 @@ class Doctor(Agent):
                 formatted += f"#{key}#\n{value}\n\n"
         return formatted.rstrip()
 
-    def revise_diagnosis_with_new_info(self, patient, new_information, context):
+    def revise_diagnosis_with_new_info(self, patient, new_information, context, current_turn=None):
         """
         Revise diagnosis when host provides new information from patient/reporter.
 
@@ -301,6 +412,7 @@ class Doctor(Agent):
             patient: Patient object
             new_information: New data from patient query or examination
             context: Host's explanation of why this info was gathered
+            current_turn: Current discussion turn number (optional, for token tracking)
         """
         current_diagnosis = self.get_diagnosis_by_patient_id(patient.id)
 
@@ -327,10 +439,20 @@ class Doctor(Agent):
 ...
 """
 
-        revised_diagnosis = self.get_response([
+        revised_diagnosis, tokens = self.get_response_with_tokens([
             {"role": "system", "content": system_message},
             {"role": "user", "content": "请提供你更新后的诊断。"}
         ])
+
+        # Track tokens for this revision
+        self.token_usage[patient.id]["total_input_tokens"] += tokens["prompt_tokens"]
+        self.token_usage[patient.id]["total_output_tokens"] += tokens["completion_tokens"]
+        self.token_usage[patient.id]["interactions"].append({
+            "input_tokens": tokens["prompt_tokens"],
+            "output_tokens": tokens["completion_tokens"],
+            "type": "revision_with_new_info",
+            "turn": current_turn
+        })
 
         # Parse and update
         diagnosis_dict = self.parse_diagnosis(revised_diagnosis)
@@ -656,19 +778,6 @@ class AiHubMixDoctor(Doctor):
         parser.add_argument('--doctor_frequency_penalty', type=float, default=0, help='frequency penalty')
         parser.add_argument('--doctor_presence_penalty', type=float, default=0, help='presence penalty')
 
-    def get_response(self, messages):
-        response = self.engine.get_response(messages)
-        return response
-
     def speak(self, content, patient_id, save_to_memory=True):
-        memories = self.memories[patient_id]
-
-        messages = [{"role": memory[0], "content": memory[1]} for memory in memories]
-        messages.append({"role": "user", "content": content})
-
-        response = self.get_response(messages)
-
-        self.memorize(("user", content), patient_id)
-        self.memorize(("assistant", response), patient_id)
-
-        return response
+        # Use parent's speak() method which includes token tracking and debug output
+        return super().speak(content, patient_id, save_to_memory)
