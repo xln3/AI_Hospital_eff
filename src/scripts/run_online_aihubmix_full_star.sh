@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 
 python -u run.py \
     --scenario Scenario.CollaborativeConsultationStar \
-    --patient_database ./data/patients_discussion.json \
+    --patient_database ./data/patients.json \
     --doctor_database ./data/collaborative_doctors/doctors_3_aihubmix.json \
     --patient Agent.Patient.GPT \
     --patient_openai_api_key "$AIHUBMIX_API_KEY" \
@@ -28,6 +28,6 @@ python -u run.py \
     --number_of_doctors 3 \
     --max_conversation_turn 7 \
     --max_discussion_turn 5 \
-    --save_path outputs/token_test_3doctors_patient_discussion_1212_star.jsonl \
+    --save_path outputs/token_test_3doctors_patient_1212_star.jsonl \
     --discussion_mode Parallel_with_Critique \
     --ff_print
